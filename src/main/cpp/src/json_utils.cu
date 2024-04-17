@@ -15,12 +15,12 @@
  */
 
 #include "json_utils.hpp"
-#include "map_utils_debug.cuh"
 
 #include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
 #include <cudf/reduction.hpp>
@@ -31,9 +31,28 @@
 #include <cudf/strings/strip.hpp>
 #include <cudf/unary.hpp>
 
+#include <sstream>
 #include <stdexcept>
 
 namespace spark_rapids_jni {
+
+// Print the content of the input device vector.
+template <typename T, typename U = int>
+void print_debug(rmm::device_uvector<T> const& input,
+                 std::string const& name,
+                 std::string const& separator,
+                 rmm::cuda_stream_view stream)
+{
+  auto const h_input = cudf::detail::make_host_vector_sync(
+    cudf::device_span<T const>{input.data(), input.size()}, stream);
+  std::stringstream ss;
+  ss << name << ":\n";
+  for (size_t i = 0; i < h_input.size(); ++i) {
+    ss << static_cast<U>(h_input[i]);
+    if (separator.size() > 0 && i + 1 < h_input.size()) { ss << separator; }
+  }
+  std::cerr << ss.str() << std::endl;
+}
 
 std::unique_ptr<cudf::column> is_empty_or_null(
     cudf::column_view const& input, 
@@ -70,7 +89,22 @@ bool contains_char(
   return ret->is_valid(stream) && reinterpret_cast<BoolScalarType *>(ret.get())->value(stream);
 }
 
-std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
+std::unique_ptr<rmm::device_uvector<cudf::io::json::SymbolT>> extract_character_buffer(cudf::column_view const& input,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {  
+  // Sadly there is no good way around this. We have to make a copy of the data...
+  cudf::strings_column_view scv(input);
+  auto data_length = scv.chars_size(stream);
+  auto ret = std::make_unique<rmm::device_uvector<cudf::io::json::SymbolT>>(data_length, stream, mr);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(ret->data(),
+                                scv.chars_begin(stream),
+                                data_length,
+                                cudaMemcpyDefault,
+                                stream.value()));
+  return ret;
+}
+
+std::pair<std::unique_ptr<rmm::device_uvector<cudf::io::json::SymbolT>>, std::unique_ptr<cudf::column>> clean_and_concat(
     cudf::column_view const& input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
@@ -93,7 +127,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
       cudf::string_scalar("{}", true, stream, mr), // This should be ignored
       stream,
       mr);
-  return std::make_pair(std::move(all_done), std::move(is_n_or_e)); 
+  return std::make_pair(extract_character_buffer(*all_done, stream, mr), std::move(is_n_or_e));
 }
 
 std::unique_ptr<cudf::column> tokenize_json(
@@ -119,7 +153,9 @@ std::unique_ptr<cudf::column> tokenize_json(
     return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
   }
 
-  auto [cleaned, was_empty] = clean(input, stream, mr);
+  auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
+  print_debug<char, char>(*cleaned, "CLEANED INPUT", "", stream);
+
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
   // just going to hard code thigns...
