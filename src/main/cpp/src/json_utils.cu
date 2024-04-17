@@ -19,6 +19,7 @@
 
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
+#include <cudf/copying.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
@@ -45,13 +46,21 @@ std::unique_ptr<cudf::column> is_empty_or_null(
   return cudf::binary_operation(*is_empty, *is_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
 }
 
-std::pair<cudf::device_span<cudf::io::json::SymbolT>, std::unique_ptr<cudf::column>> clean_and_concat(
+std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
     cudf::column_view const & input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
   auto const input_scv  = cudf::strings_column_view{input};
   auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar(""), stream, mr);
   auto is_n_or_e = is_empty_or_null(*stripped, stream, mr);
+  auto empty_row = cudf::make_string_scalar("{}", stream, mr);
+  auto cleaned = cudf::copy_if_else(*empty_row, *stripped, *is_n_or_e, stream, mr);
+  stripped.reset();
+  empty_row.reset();
+
+
+  // TODO probably want to have/use a data source instead of a concat buffer.
+
   /*
   auto const d_strings  = cudf::column_device_view::create(input, stream);
   auto const chars_size = input_scv.chars_size(stream);
@@ -121,7 +130,7 @@ std::unique_ptr<cudf::column> tokenize_json(
     return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
   }
 
-  auto [concated, was_empty] = clean_and_concat(input, stream, mr);
+  auto [cleaned, was_empty] = clean(input, stream, mr);
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
   // just going to hard code thigns...
