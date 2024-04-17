@@ -15,6 +15,7 @@
  */
 
 #include "json_utils.hpp"
+#include "map_utils_debug.cuh"
 
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
@@ -23,23 +24,25 @@
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/attributes.hpp>
 #include <cudf/strings/strip.hpp>
+#include <cudf/unary.hpp>
 
 #include <stdexcept>
 
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> is_empty_or_null(
-    const cudf::strings_column_view & input, 
+    const cudf::column_view & input, 
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
 
-  auto byte_count = cudf::strings::count_bytes(input, mr); // stream not exposed yet...
+  auto byte_count = cudf::strings::count_bytes(cudf::strings_column_view{input}, mr); // stream not exposed yet...
   using IntScalarType = cudf::scalar_type_t<int32_t>;
   auto zero = cudf::make_numeric_scalar(cudf::data_type{cudf::type_id::INT32}, stream, mr);
   reinterpret_cast<IntScalarType *>(zero.get())->set_value(0, stream);
   zero->set_valid_async(true, stream);
-  //auto is_empty = cudf::binary_operation(byte_count, cudf::
-  throw std::runtime_error("WIP");
+  auto is_empty = cudf::binary_operation(*byte_count, *zero, cudf::binary_operator::LESS_EQUAL, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
+  auto is_null = cudf::is_null(input, stream, mr);
+  return cudf::binary_operation(*is_empty, *is_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
 }
 
 std::pair<cudf::device_span<cudf::io::json::SymbolT>, std::unique_ptr<cudf::column>> clean_and_concat(
@@ -48,8 +51,7 @@ std::pair<cudf::device_span<cudf::io::json::SymbolT>, std::unique_ptr<cudf::colu
     rmm::mr::device_memory_resource* mr) {
   auto const input_scv  = cudf::strings_column_view{input};
   auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar(""), stream, mr);
-  auto const stripped_scv = cudf::strings_column_view{*stripped};
-  auto is_n_or_e = is_empty_or_null(stripped_scv, stream, mr);
+  auto is_n_or_e = is_empty_or_null(*stripped, stream, mr);
   /*
   auto const d_strings  = cudf::column_device_view::create(input, stream);
   auto const chars_size = input_scv.chars_size(stream);
