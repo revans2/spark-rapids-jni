@@ -43,7 +43,13 @@ std::unique_ptr<cudf::column> is_empty_or_null(
   zero->set_valid_async(true, stream);
   auto is_empty = cudf::binary_operation(*byte_count, *zero, cudf::binary_operator::LESS_EQUAL, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
   auto is_null = cudf::is_null(input, stream, mr);
-  return cudf::binary_operation(*is_empty, *is_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
+  auto mostly_empty_or_null = cudf::binary_operation(*is_empty, *is_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
+  is_empty.reset();
+  is_null.reset();
+  zero.reset();
+  auto null_lit = cudf::make_string_scalar("null");
+  auto is_lit_null = cudf::binary_operation(*null_lit, input, cudf::binary_operator::EQUAL, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
+  return cudf::binary_operation(*is_lit_null, *mostly_empty_or_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
 }
 
 std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
@@ -57,6 +63,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
   auto cleaned = cudf::copy_if_else(*empty_row, *stripped, *is_n_or_e, stream, mr);
   stripped.reset();
   empty_row.reset();
+
 
 
   // TODO probably want to have/use a data source instead of a concat buffer.
