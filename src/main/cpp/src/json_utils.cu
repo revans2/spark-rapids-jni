@@ -16,21 +16,40 @@
 
 #include "json_utils.hpp"
 
+#include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
+#include <cudf/scalar/scalar_factories.hpp>
+#include <cudf/strings/attributes.hpp>
 #include <cudf/strings/strip.hpp>
 
 #include <stdexcept>
 
 namespace spark_rapids_jni {
 
-std::pair<cudf::device_span<cudf::io::json::SymbolT>, cudf::column> clean_and_concat(
+std::unique_ptr<cudf::column> is_empty_or_null(
+    const cudf::strings_column_view & input, 
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+  auto byte_count = cudf::strings::count_bytes(input, mr); // stream not exposed yet...
+  using IntScalarType = cudf::scalar_type_t<int32_t>;
+  auto zero = cudf::make_numeric_scalar(cudf::data_type{cudf::type_id::INT32}, stream, mr);
+  reinterpret_cast<IntScalarType *>(zero.get())->set_value(0, stream);
+  zero->set_valid_async(true, stream);
+  //auto is_empty = cudf::binary_operation(byte_count, cudf::
+  throw std::runtime_error("WIP");
+}
+
+std::pair<cudf::device_span<cudf::io::json::SymbolT>, std::unique_ptr<cudf::column>> clean_and_concat(
     cudf::column_view const & input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
   auto const input_scv  = cudf::strings_column_view{input};
   auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar(""), stream, mr);
+  auto const stripped_scv = cudf::strings_column_view{*stripped};
+  auto is_n_or_e = is_empty_or_null(stripped_scv, stream, mr);
   /*
   auto const d_strings  = cudf::column_device_view::create(input, stream);
   auto const chars_size = input_scv.chars_size(stream);
