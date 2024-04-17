@@ -17,13 +17,16 @@
 #include "json_utils.hpp"
 #include "map_utils_debug.cuh"
 
+#include <cudf/aggregation.hpp>
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
+#include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/attributes.hpp>
+#include <cudf/strings/find.hpp>
 #include <cudf/strings/strip.hpp>
 #include <cudf/unary.hpp>
 
@@ -32,7 +35,7 @@
 namespace spark_rapids_jni {
 
 std::unique_ptr<cudf::column> is_empty_or_null(
-    const cudf::column_view & input, 
+    cudf::column_view const& input, 
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
 
@@ -47,13 +50,27 @@ std::unique_ptr<cudf::column> is_empty_or_null(
   is_empty.reset();
   is_null.reset();
   zero.reset();
-  auto null_lit = cudf::make_string_scalar("null");
+  auto null_lit = cudf::make_string_scalar("null", stream, mr);
   auto is_lit_null = cudf::binary_operation(*null_lit, input, cudf::binary_operator::EQUAL, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
   return cudf::binary_operation(*is_lit_null, *mostly_empty_or_null, cudf::binary_operator::NULL_LOGICAL_OR, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
 }
 
+bool contains_char(
+    cudf::column_view const& input,
+    std::string const& needle,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+
+  cudf::string_scalar s(needle, stream, mr);
+  auto has_s = cudf::strings::contains(cudf::strings_column_view(input), s);
+  auto any = cudf::make_any_aggregation<cudf::reduce_aggregation>();
+  auto ret = cudf::reduce(*has_s, *any, cudf::data_type{cudf::type_id::BOOL8}, mr); // no stream is supported for reduce yet
+  using BoolScalarType = cudf::scalar_type_t<bool>;
+  return ret->is_valid(stream) && reinterpret_cast<BoolScalarType *>(ret.get())->value(stream);
+}
+
 std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
-    cudf::column_view const & input,
+    cudf::column_view const& input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
   auto const input_scv  = cudf::strings_column_view{input};
@@ -63,6 +80,12 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
   auto cleaned = cudf::copy_if_else(*empty_row, *stripped, *is_n_or_e, stream, mr);
   stripped.reset();
   empty_row.reset();
+  if (contains_char(*cleaned, "\n", stream, mr)) {
+    throw std::logic_error("line separator is not currently supported in a JSON string");
+  }
+  if (contains_char(*cleaned, "\r", stream, mr)) {
+    throw std::logic_error("carriage return is not currently supported in a JSON string");
+  }
 
 
 
