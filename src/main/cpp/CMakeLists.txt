@@ -173,6 +173,7 @@ add_library(
   src/decimal_utils.cu
   src/get_json_object.cu
   src/histogram.cu
+  src/json_utils.cu
   src/map_utils.cu
   src/murmur_hash.cu
   src/parse_uri.cu
