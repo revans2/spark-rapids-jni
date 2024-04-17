@@ -16,6 +16,7 @@
 
 #include "json_utils.hpp"
 
+#include <cudf/column/column_factories.hpp>
 #include <cudf/io/detail/json.hpp>
 
 #include <stdexcept>
@@ -25,12 +26,6 @@ namespace spark_rapids_jni {
 // TODO is this really the right way to do this???
 std::pair<cudf::column, cudf::column> clean_and_concat(cudf::column_view const & input) {
   /*
-  if (input.is_empty()) {
-    // make an empty buffer
-    return cudf::detail::make_device_uvector_async<char>(
-      std::vector<char>{'[', ']'}, stream, rmm::mr::get_current_device_resource());
-  }
-
   auto const d_strings  = cudf::column_device_view::create(input, stream);
   auto const input_scv  = cudf::strings_column_view{input};
   auto const chars_size = input_scv.chars_size(stream);
@@ -84,6 +79,22 @@ std::unique_ptr<cudf::column> tokenize_json(
   rmm::mr::device_memory_resource* mr) {
 
   CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Invalid input format");
+
+  if (input.is_empty()) {
+    auto tok_out = cudf::make_empty_column(cudf::type_id::INT8);
+    auto offset_out = cudf::make_empty_column(cudf::type_id::UINT32);
+    std::vector<std::unique_ptr<cudf::column>> tok_off_children;
+    tok_off_children.push_back(std::move(tok_out));
+    tok_off_children.push_back(std::move(offset_out));
+    auto tok_off_out = cudf::make_structs_column(0, std::move(tok_off_children), 0, rmm::device_buffer{}, stream, mr);
+    auto empty_offsets = cudf::make_empty_column(cudf::type_id::INT32);
+    auto tokens_out = cudf::make_lists_column(0, std::move(empty_offsets), std::move(tok_off_out), 0, rmm::device_buffer{}, stream, mr);
+    auto buffer_out = cudf::make_empty_column(cudf::type_id::STRING);
+    std::vector<std::unique_ptr<cudf::column>> children;
+    children.push_back(std::move(buffer_out));
+    children.push_back(std::move(tokens_out));
+    return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
+  }
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
   // just going to hard code thigns...

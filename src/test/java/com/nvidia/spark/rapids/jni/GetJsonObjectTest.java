@@ -29,6 +29,21 @@ public class GetJsonObjectTest {
 
 
   @Test
+  void emptyTokenizeTest() {
+    HostColumnVector.DataType bufferDt = new HostColumnVector.BasicType(false, DType.STRING);
+    HostColumnVector.DataType tokenDt = new HostColumnVector.BasicType(false, DType.INT8);
+    HostColumnVector.DataType offsetDt = new HostColumnVector.BasicType(false, DType.UINT32);
+    HostColumnVector.DataType elementDt = new HostColumnVector.StructType(true, tokenDt, offsetDt);
+    HostColumnVector.DataType tokensDt = new HostColumnVector.ListType(false, elementDt);
+    HostColumnVector.DataType returnDt = new HostColumnVector.StructType(true, bufferDt, tokensDt);
+    try (ColumnVector jsonCv = ColumnVector.fromStrings();
+         ColumnVector expected = ColumnVector.fromStructs(returnDt);
+         ColumnVector actual = JSONUtils.tokenizeJson(jsonCv)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
   void simpleTokenizeTest() {
     HostColumnVector.DataType bufferDt = new HostColumnVector.BasicType(false, DType.STRING);
     HostColumnVector.DataType tokenDt = new HostColumnVector.BasicType(false, DType.INT8);
