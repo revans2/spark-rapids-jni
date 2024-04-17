@@ -18,13 +18,13 @@
 
 #include <cudf/column/column_factories.hpp>
 #include <cudf/io/detail/json.hpp>
+#include <cudf/io/detail/tokenize_json.hpp>
 
 #include <stdexcept>
 
 namespace spark_rapids_jni {
 
-// TODO is this really the right way to do this???
-std::pair<cudf::column, cudf::column> clean_and_concat(cudf::column_view const & input) {
+std::pair<cudf::device_span<cudf::io::json::SymbolT>, cudf::column> clean_and_concat(cudf::column_view const & input) {
   /*
   auto const d_strings  = cudf::column_device_view::create(input, stream);
   auto const input_scv  = cudf::strings_column_view{input};
@@ -96,14 +96,14 @@ std::unique_ptr<cudf::column> tokenize_json(
     return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
   }
 
+  auto [concated, was_empty] = clean_and_concat(input);
+
   // TODO we probably want a JSON options to pass in at some point. For now we are
   // just going to hard code thigns...
 
   // First off we need to get all of the data into a single buffer.  In the future
   // This will use \0 nul as the separator, but for now we are going to use \n
   // and check that it is not in there...
-
-  auto [concated, was_empty] = clean_and_concat(input);
 
   throw std::runtime_error("NOT IMPLEMENTED YET");
 }
