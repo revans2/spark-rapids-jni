@@ -17,6 +17,7 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
+import ai.rapids.cudf.CudfException;
 import ai.rapids.cudf.DType;
 import ai.rapids.cudf.HostColumnVector;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
 
@@ -40,6 +42,16 @@ public class GetJsonObjectTest {
          ColumnVector expected = ColumnVector.fromStructs(returnDt);
          ColumnVector actual = JSONUtils.tokenizeJson(jsonCv)) {
       assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void hasNewLine() {
+    try (ColumnVector jsonCv = ColumnVector.fromStrings(
+            "{'k': \"v\",\n\"A\": [1, 2, 3, 4]}")) {
+      assertThrows(CudfException.class, () -> {
+        JSONUtils.tokenizeJson(jsonCv).close();
+      });
     }
   }
 
