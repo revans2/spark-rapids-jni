@@ -26,6 +26,7 @@
 #include <cudf/reduction.hpp>
 #include <cudf/scalar/scalar_factories.hpp>
 #include <cudf/strings/attributes.hpp>
+#include <cudf/strings/combine.hpp>
 #include <cudf/strings/find.hpp>
 #include <cudf/strings/strip.hpp>
 #include <cudf/unary.hpp>
@@ -61,7 +62,7 @@ bool contains_char(
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
 
-  cudf::string_scalar s(needle, stream, mr);
+  cudf::string_scalar s(needle, true, stream, mr);
   auto has_s = cudf::strings::contains(cudf::strings_column_view(input), s);
   auto any = cudf::make_any_aggregation<cudf::reduce_aggregation>();
   auto ret = cudf::reduce(*has_s, *any, cudf::data_type{cudf::type_id::BOOL8}, mr); // no stream is supported for reduce yet
@@ -74,7 +75,7 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
   auto const input_scv  = cudf::strings_column_view{input};
-  auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar(""), stream, mr);
+  auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar("", true, stream, mr), stream, mr);
   auto is_n_or_e = is_empty_or_null(*stripped, stream, mr);
   auto empty_row = cudf::make_string_scalar("{}", stream, mr);
   auto cleaned = cudf::copy_if_else(*empty_row, *stripped, *is_n_or_e, stream, mr);
@@ -86,55 +87,13 @@ std::pair<std::unique_ptr<cudf::column>, std::unique_ptr<cudf::column>> clean(
   if (contains_char(*cleaned, "\r", stream, mr)) {
     throw std::logic_error("carriage return is not currently supported in a JSON string");
   }
-
-
-
-  // TODO probably want to have/use a data source instead of a concat buffer.
-
-  /*
-  auto const d_strings  = cudf::column_device_view::create(input, stream);
-  auto const chars_size = input_scv.chars_size(stream);
-  auto const output_size =
-    static_cast<int64_t>(chars_size) +
-    static_cast<int64_t>(input.size() - 1) +        // append `\n` character between input rows
-    static_cast<int64_t>(input.null_count()) * 2l;  // replace null with "{}" (we probably want to deal with empty strings too)
-  // TODO: This assertion eventually needs to be removed.
-  // See https://github.com/NVIDIA/spark-rapids-jni/issues/1707
-  CUDF_EXPECTS(output_size <= static_cast<int64_t>(std::numeric_limits<cudf::size_type>::max()),
-               "The input json column is too large and causes overflow.");
-
-  auto const joined_input = cudf::strings::detail::join_strings(
-    input_scv,
-    cudf::string_scalar("\n"),   // append `,` character between the input rows
-    cudf::string_scalar("{}"),  // replacement for null rows
-    stream,
-    mr);
-  auto const joined_input_scv        = cudf::strings_column_view{*joined_input};
-  auto const joined_input_size_bytes = joined_input_scv.chars_size(stream);
-  // TODO: This assertion requires a stream synchronization, may want to remove at some point.
-  // See https://github.com/NVIDIA/spark-rapids-jni/issues/1707
-  CUDF_EXPECTS(joined_input_size_bytes + 2 == output_size, "Incorrect output size computation.");
-
-  // We want to concatenate 3 strings: "[" + joined_input + "]".
-  // For efficiency, let's use memcpy instead of `cudf::strings::detail::concatenate`.
-  auto output = rmm::device_uvector<char>(joined_input_size_bytes + 2, stream);
-  CUDF_CUDA_TRY(cudaMemsetAsync(output.data(), static_cast<int>('['), 1, stream.value()));
-  CUDF_CUDA_TRY(cudaMemcpyAsync(output.data() + 1,
-                                joined_input_scv.chars_begin(stream),
-                                joined_input_size_bytes,
-                                cudaMemcpyDefault,
-                                stream.value()));
-  CUDF_CUDA_TRY(cudaMemsetAsync(
-    output.data() + joined_input_size_bytes + 1, static_cast<int>(']'), 1, stream.value()));
-
-#ifdef DEBUG_FROM_JSON
-  print_debug<char, char>(output, "Processed json string", "", stream);
-#endif
-  return output;
-
-  if (input.data
-  */
-  throw std::runtime_error("NOT DONE YET");
+  // Eventually we want to use null, but for now...
+  auto all_done = cudf::strings::join_strings(cudf::strings_column_view(*cleaned),
+      cudf::string_scalar("\n", true, stream, mr),
+      cudf::string_scalar("{}", true, stream, mr), // This should be ignored
+      stream,
+      mr);
+  return std::make_pair(std::move(all_done), std::move(is_n_or_e)); 
 }
 
 std::unique_ptr<cudf::column> tokenize_json(
