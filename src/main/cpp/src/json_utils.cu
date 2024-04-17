@@ -19,21 +19,25 @@
 #include <cudf/column/column_factories.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
+#include <cudf/strings/strip.hpp>
 
 #include <stdexcept>
 
 namespace spark_rapids_jni {
 
-std::pair<cudf::device_span<cudf::io::json::SymbolT>, cudf::column> clean_and_concat(cudf::column_view const & input) {
+std::pair<cudf::device_span<cudf::io::json::SymbolT>, cudf::column> clean_and_concat(
+    cudf::column_view const & input,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+  auto const input_scv  = cudf::strings_column_view{input};
+  auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar(""), stream, mr);
   /*
   auto const d_strings  = cudf::column_device_view::create(input, stream);
-  auto const input_scv  = cudf::strings_column_view{input};
   auto const chars_size = input_scv.chars_size(stream);
   auto const output_size =
-    2l +                                            // two extra bracket characters '[' and ']'
     static_cast<int64_t>(chars_size) +
-    static_cast<int64_t>(input.size() - 1) +        // append `,` character between input rows
-    static_cast<int64_t>(input.null_count()) * 2l;  // replace null with "{}"
+    static_cast<int64_t>(input.size() - 1) +        // append `\n` character between input rows
+    static_cast<int64_t>(input.null_count()) * 2l;  // replace null with "{}" (we probably want to deal with empty strings too)
   // TODO: This assertion eventually needs to be removed.
   // See https://github.com/NVIDIA/spark-rapids-jni/issues/1707
   CUDF_EXPECTS(output_size <= static_cast<int64_t>(std::numeric_limits<cudf::size_type>::max()),
@@ -41,10 +45,10 @@ std::pair<cudf::device_span<cudf::io::json::SymbolT>, cudf::column> clean_and_co
 
   auto const joined_input = cudf::strings::detail::join_strings(
     input_scv,
-    cudf::string_scalar(","),   // append `,` character between the input rows
+    cudf::string_scalar("\n"),   // append `,` character between the input rows
     cudf::string_scalar("{}"),  // replacement for null rows
     stream,
-    rmm::mr::get_current_device_resource());
+    mr);
   auto const joined_input_scv        = cudf::strings_column_view{*joined_input};
   auto const joined_input_size_bytes = joined_input_scv.chars_size(stream);
   // TODO: This assertion requires a stream synchronization, may want to remove at some point.
@@ -96,7 +100,7 @@ std::unique_ptr<cudf::column> tokenize_json(
     return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
   }
 
-  auto [concated, was_empty] = clean_and_concat(input);
+  auto [concated, was_empty] = clean_and_concat(input, stream, mr);
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
   // just going to hard code thigns...
