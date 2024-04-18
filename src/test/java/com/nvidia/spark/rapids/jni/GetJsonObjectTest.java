@@ -48,7 +48,7 @@ public class GetJsonObjectTest {
   @Test
   void hasNewLine() {
     try (ColumnVector jsonCv = ColumnVector.fromStrings(
-            "{'k': \"v\",\n\"A\": [1, 2, 3, 4]}")) {
+            "{'key': \"val\\bue\" ,\n\"ARRAY\" : [ 1.0 , 2.0, 3 , 44.01 ]}")) {
       assertThrows(CudfException.class, () -> {
         JSONUtils.tokenizeJson(jsonCv).close();
       });
@@ -64,7 +64,11 @@ public class GetJsonObjectTest {
     HostColumnVector.DataType tokensDt = new HostColumnVector.ListType(false, elementDt);
     HostColumnVector.DataType returnDt = new HostColumnVector.StructType(true, bufferDt, tokensDt);
     try (ColumnVector jsonCv = ColumnVector.fromStrings(
-            "{'k': \"v\", \"A\": [1, 2, 3, 4]}");
+            "{'test':'value'}{'k': \"v\", \"A\": [1, 2, 3, 4]}",
+            "{'key': \"val\\bue\" , \"ARRAY\" : [ 1.0 , 2.0, 3 , 44.01 ]}",
+            "{'ERROR':",
+            "{}",
+            "[100, 200, 300]");
          ColumnVector expected = ColumnVector.fromStructs(returnDt,
                  // TODO actually finish this...
                  new HostColumnVector.StructData("{\"k\":\"v\",\"A\":[1,2,3,4]}",

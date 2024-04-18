@@ -36,6 +36,28 @@
 
 namespace spark_rapids_jni {
 
+// Convert the token value into string name, for debugging purpose.
+std::string token_to_string(cudf::io::json::PdaTokenT const token_type)
+{
+  switch (token_type) {
+    case cudf::io::json::token_t::StructBegin: return "StructBegin";
+    case cudf::io::json::token_t::StructEnd: return "StructEnd";
+    case cudf::io::json::token_t::ListBegin: return "ListBegin";
+    case cudf::io::json::token_t::ListEnd: return "ListEnd";
+    case cudf::io::json::token_t::StructMemberBegin: return "StructMemberBegin";
+    case cudf::io::json::token_t::StructMemberEnd: return "StructMemberEnd";
+    case cudf::io::json::token_t::FieldNameBegin: return "FieldNameBegin";
+    case cudf::io::json::token_t::FieldNameEnd: return "FieldNameEnd";
+    case cudf::io::json::token_t::StringBegin: return "StringBegin";
+    case cudf::io::json::token_t::StringEnd: return "StringEnd";
+    case cudf::io::json::token_t::ValueBegin: return "ValueBegin";
+    case cudf::io::json::token_t::ValueEnd: return "ValueEnd";
+    case cudf::io::json::token_t::ErrorBegin: return "ErrorBegin";
+    case cudf::io::json::token_t::LineEnd: return "LineEnd";
+    default: return "Unknown";
+  }
+}
+
 // Print the content of the input device vector.
 template <typename T, typename U = int>
 void print_debug(rmm::device_uvector<T> const& input,
@@ -50,6 +72,51 @@ void print_debug(rmm::device_uvector<T> const& input,
   for (size_t i = 0; i < h_input.size(); ++i) {
     ss << static_cast<U>(h_input[i]);
     if (separator.size() > 0 && i + 1 < h_input.size()) { ss << separator; }
+  }
+  std::cerr << ss.str() << std::endl;
+}
+
+// Print the content of the input device vector.
+void print_debug_tokens(rmm::device_uvector<cudf::io::json::PdaTokenT> const& tokens,
+    rmm::device_uvector<uint32_t> const& offsets,
+    rmm::device_uvector<char> const& str_data,
+    std::string const& name,
+    std::string const& separator,
+    rmm::cuda_stream_view stream)
+{
+  auto const h_tokens = cudf::detail::make_host_vector_sync(
+    cudf::device_span<cudf::io::json::PdaTokenT const>{tokens.data(), tokens.size()}, stream);
+  auto const h_offsets = cudf::detail::make_host_vector_sync(
+    cudf::device_span<uint32_t const>{offsets.data(), offsets.size()}, stream);
+  auto const h_str_data = cudf::detail::make_host_vector_sync(
+    cudf::device_span<char const>{str_data.data(), str_data.size()}, stream);
+
+  std::stringstream ss;
+  ss << name << ":\n";
+  uint32_t str_begin = 0;
+  for (size_t i = 0; i < h_tokens.size(); ++i) {
+    ss << token_to_string(h_tokens[i]) << " " << h_offsets[i];
+    if (h_tokens[i] == cudf::io::json::token_t::FieldNameBegin ||
+        h_tokens[i] == cudf::io::json::token_t::StringBegin ||
+        h_tokens[i] == cudf::io::json::token_t::ValueBegin) {
+      str_begin = h_offsets[i];
+    }
+    if (h_tokens[i] == cudf::io::json::token_t::FieldNameEnd ||
+        h_tokens[i] == cudf::io::json::token_t::StringEnd) {
+      uint32_t str_end = h_offsets[i];
+      // strings are inclusive, but include the quotes
+      std::string d(&h_str_data[str_begin + 1], str_end - str_begin - 1);
+      ss << " |" << d << "|";
+    }
+    if (h_tokens[i] == cudf::io::json::token_t::ValueEnd) {
+      uint32_t str_end = h_offsets[i];
+      // value end is not inclusive
+      std::string d(&h_str_data[str_begin], str_end - str_begin);
+      ss << " |" << d << "|";
+    }
+
+
+    if (separator.size() > 0 && i + 1 < h_tokens.size()) { ss << separator; }
   }
   std::cerr << ss.str() << std::endl;
 }
@@ -172,6 +239,9 @@ std::unique_ptr<cudf::column> tokenize_json(
     json_opts,
     stream,
     mr);
+
+  print_debug_tokens(tokens, token_indices, cleaned, "RAW TOKES", "\n", stream);
+
 
   // TODO would a tree representation be better???
 
