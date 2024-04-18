@@ -89,14 +89,14 @@ bool contains_char(
   return ret->is_valid(stream) && reinterpret_cast<BoolScalarType *>(ret.get())->value(stream);
 }
 
-std::unique_ptr<rmm::device_uvector<cudf::io::json::SymbolT>> extract_character_buffer(cudf::column_view const& input,
+rmm::device_uvector<cudf::io::json::SymbolT> extract_character_buffer(cudf::column_view const& input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {  
   // Sadly there is no good way around this. We have to make a copy of the data...
   cudf::strings_column_view scv(input);
   auto data_length = scv.chars_size(stream);
-  auto ret = std::make_unique<rmm::device_uvector<cudf::io::json::SymbolT>>(data_length, stream, mr);
-  CUDF_CUDA_TRY(cudaMemcpyAsync(ret->data(),
+  rmm::device_uvector<cudf::io::json::SymbolT> ret(data_length, stream, mr);
+  CUDF_CUDA_TRY(cudaMemcpyAsync(ret.data(),
                                 scv.chars_begin(stream),
                                 data_length,
                                 cudaMemcpyDefault,
@@ -104,7 +104,7 @@ std::unique_ptr<rmm::device_uvector<cudf::io::json::SymbolT>> extract_character_
   return ret;
 }
 
-std::pair<std::unique_ptr<rmm::device_uvector<cudf::io::json::SymbolT>>, std::unique_ptr<cudf::column>> clean_and_concat(
+std::pair<rmm::device_uvector<cudf::io::json::SymbolT>, std::unique_ptr<cudf::column>> clean_and_concat(
     cudf::column_view const& input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
@@ -154,7 +154,11 @@ std::unique_ptr<cudf::column> tokenize_json(
   }
 
   auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
-  print_debug<char, char>(*cleaned, "CLEANED INPUT", "", stream);
+  print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
+  cleaned = cudf::io::json::detail::normalize_single_quotes(std::move(cleaned), stream, mr);
+  print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
+  cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
+  print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
 
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
