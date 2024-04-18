@@ -157,8 +157,23 @@ std::unique_ptr<cudf::column> tokenize_json(
   print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
   cleaned = cudf::io::json::detail::normalize_single_quotes(std::move(cleaned), stream, mr);
   print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
-  cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
-  print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
+  //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
+  //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
+  // We will probably do ws normalization as we write out the data. This is true for number normalization too
+
+  auto json_opts = cudf::io::json_reader_options_builder()
+    .lines(true)
+    .mixed_types_as_string(true)
+    .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
+    .build();
+
+  auto const [tokens, token_indices] = cudf::io::json::detail::get_token_stream(
+    cudf::device_span<char const>{cleaned.data(), cleaned.size()},
+    json_opts,
+    stream,
+    mr);
+
+  // TODO would a tree representation be better???
 
 
   // TODO we probably want a JSON options to pass in at some point. For now we are
