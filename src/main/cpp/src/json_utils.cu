@@ -20,6 +20,7 @@
 #include <cudf/binaryop.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
+#include <cudf/detail/nvtx/ranges.hpp>
 #include <cudf/detail/utilities/vector_factories.hpp>
 #include <cudf/io/detail/json.hpp>
 #include <cudf/io/detail/tokenize_json.hpp>
@@ -125,7 +126,7 @@ std::unique_ptr<cudf::column> is_empty_or_null(
     cudf::column_view const& input, 
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
-
+  CUDF_FUNC_RANGE();
   auto byte_count = cudf::strings::count_bytes(cudf::strings_column_view{input}, mr); // stream not exposed yet...
   using IntScalarType = cudf::scalar_type_t<int32_t>;
   auto zero = cudf::make_numeric_scalar(cudf::data_type{cudf::type_id::INT32}, stream, mr);
@@ -147,7 +148,7 @@ bool contains_char(
     std::string const& needle,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
-
+  CUDF_FUNC_RANGE();
   cudf::string_scalar s(needle, true, stream, mr);
   auto has_s = cudf::strings::contains(cudf::strings_column_view(input), s);
   auto any = cudf::make_any_aggregation<cudf::reduce_aggregation>();
@@ -175,6 +176,7 @@ std::pair<rmm::device_uvector<cudf::io::json::SymbolT>, std::unique_ptr<cudf::co
     cudf::column_view const& input,
     rmm::cuda_stream_view stream,
     rmm::mr::device_memory_resource* mr) {
+  CUDF_FUNC_RANGE();
   auto const input_scv  = cudf::strings_column_view{input};
   auto stripped = cudf::strings::strip(input_scv, cudf::strings::side_type::BOTH, cudf::string_scalar("", true, stream, mr), stream, mr);
   auto is_n_or_e = is_empty_or_null(*stripped, stream, mr);
@@ -255,5 +257,42 @@ std::unique_ptr<cudf::column> tokenize_json(
 
   throw std::runtime_error("NOT IMPLEMENTED YET");
 }
+
+
+std::unique_ptr<cudf::column> different_get_json_object(
+  cudf::column_view const& input,
+  std::vector<std::tuple<diff_path_instruction_type, std::string, int64_t>> const& instructions,
+  rmm::cuda_stream_view stream,
+  rmm::mr::device_memory_resource* mr) {
+
+  CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Invalid input format");
+  CUDF_FUNC_RANGE();
+
+  auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
+  //print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
+  cleaned = cudf::io::json::detail::normalize_single_quotes(std::move(cleaned), stream, mr);
+  //print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
+  //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
+  //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
+  // We will probably do ws normalization as we write out the data. This is true for number normalization too
+
+  auto json_opts = cudf::io::json_reader_options_builder()
+    .lines(true)
+    .mixed_types_as_string(true)
+    .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
+    .build();
+
+  auto const [tokens, token_indices] = cudf::io::json::detail::get_token_stream(
+    cudf::device_span<char const>{cleaned.data(), cleaned.size()},
+    json_opts,
+    stream,
+    mr);
+
+  // TODO this is just for profiling for now. Lets return an empty string column...
+  auto rows = input.size();
+  auto str_scalar = cudf::make_string_scalar("TODO FIX ME!!!!", stream, mr);
+  return cudf::make_column_from_scalar(*str_scalar, rows, stream, mr);
+}
+
 
 }  // namespace spark_rapids_jni

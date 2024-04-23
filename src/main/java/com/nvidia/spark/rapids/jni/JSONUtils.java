@@ -52,6 +52,11 @@ public class JSONUtils {
     return new ColumnVector(getJsonObject(input.getNativeView(), path_instructions));
   }
 
+  public static ColumnVector differentGetJsonObject(ColumnVector input, PathInstructionJni[] path_instructions) {
+    assert(input.getType().equals(DType.STRING)) : "column must be a String";
+    return new ColumnVector(differentGetJsonObject(input.getNativeView(), path_instructions));
+  }
+
   // TODO might want to have some options to tokenize this differently. We also need to talk about how to deal
   //  with single quotes after tokenization. Might need to point to things in a better way???
   public static ColumnVector tokenizeJson(ColumnVector input) {
@@ -60,5 +65,6 @@ public class JSONUtils {
   }
 
   private static native long getJsonObject(long input, PathInstructionJni[] path_instructions);
+  private static native long differentGetJsonObject(long input, PathInstructionJni[] path_instructions);
   private static native long tokenizeJson(long input);
 }

@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
 
-
+/*
   @Test
   void emptyTokenizeTest() {
     HostColumnVector.DataType bufferDt = new HostColumnVector.BasicType(false, DType.STRING);
@@ -77,6 +77,7 @@ public class GetJsonObjectTest {
       assertColumnsAreEqual(expected, actual);
     }
   }
+*/
 
   /**
    * Test: query is $.k

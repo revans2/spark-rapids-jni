@@ -26,6 +26,12 @@
 namespace spark_rapids_jni {
 
 /**
+ * path instruction type
+ */
+enum class diff_path_instruction_type { SUBSCRIPT, WILDCARD, KEY, INDEX, NAMED };
+
+
+/**
  * Tokenize an input string column and return a column of the form
  * STRUCT<buffer: String, tokens: LIST<STRUCT<tok: INT8, offset: UINT32>>
  * 
@@ -37,6 +43,13 @@ namespace spark_rapids_jni {
  */
 std::unique_ptr<cudf::column> tokenize_json(
   cudf::column_view const& input,
+  rmm::cuda_stream_view stream        = cudf::get_default_stream(),
+  rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
+
+
+std::unique_ptr<cudf::column> different_get_json_object(
+  cudf::column_view const& input,
+  std::vector<std::tuple<diff_path_instruction_type, std::string, int64_t>> const& instructions,
   rmm::cuda_stream_view stream        = cudf::get_default_stream(),
   rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
 
