@@ -67,4 +67,20 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject
   }
   CATCH_STD(env, 0);
 }
+
+JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_isJsonValid(
+  JNIEnv* env, jclass, jlong input_column)
+{
+  JNI_NULL_CHECK(env, input_column, "input column is null", 0);
+  try {
+    cudf::jni::auto_set_device(env);
+    auto const n_column_view      = reinterpret_cast<cudf::column_view const*>(input_column);
+    auto const n_strings_col_view = cudf::strings_column_view{*n_column_view};
+
+    return cudf::jni::release_as_jlong(
+      spark_rapids_jni::validate_json(n_strings_col_view));
+  }
+  CATCH_STD(env, 0);
+}
+
 }

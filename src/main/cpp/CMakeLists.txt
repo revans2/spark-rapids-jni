@@ -184,6 +184,8 @@ add_library(
   src/zorder.cu
 )
 
+set_source_files_properties(src/get_json_object.cu PROPERTIES COMPILE_FLAGS "-lineinfo")
+
 set_target_properties(
   spark_rapids_jni
   PROPERTIES BUILD_RPATH "\$ORIGIN"

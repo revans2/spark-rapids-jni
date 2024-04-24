@@ -22,6 +22,19 @@ import org.junit.jupiter.api.Test;
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 
 public class GetJsonObjectTest {
+
+  @Test
+  void validJsonTest() {
+    try (ColumnVector cv = ColumnVector.fromStrings(
+            "{}",
+            "{\"a\": 100}",
+            "NOPE");
+         ColumnVector expected = ColumnVector.fromBooleans(true, true, false);
+         ColumnVector found = JSONUtils.isJsonValid(cv)) {
+      assertColumnsAreEqual(expected, found);
+    }
+  }
+
   /**
    * Test: query is $.k
    */

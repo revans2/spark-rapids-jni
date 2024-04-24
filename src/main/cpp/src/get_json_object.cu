@@ -883,6 +883,16 @@ __device__ thrust::pair<bool, size_t> get_json_object_single(
   return {success, generator.get_output_len()};
 }
 
+__device__ bool validate_json_single(
+  char const* input,
+  cudf::size_type input_len)
+{
+  json_parser j_parser(input, input_len);
+  j_parser.next_token();
+  // JSON validation check
+  return json_token::ERROR != j_parser.get_current_token();
+}
+
 /**
  * @brief Kernel for running the JSONPath query.
  *
@@ -1031,6 +1041,50 @@ std::unique_ptr<cudf::column> get_json_object(
                              std::move(validity));
 }
 
+
+template <int block_size>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void validate_json_kernel(cudf::column_device_view col,
+                            cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+
+  while (tid < col.size()) {
+    cudf::string_view const str = col.element<cudf::string_view>(tid);
+    out.element<bool>(tid) = validate_json_single(str.data(), str.size_bytes());
+    tid += stride;
+  }
+}
+
+std::unique_ptr<cudf::column> validate_json(
+  cudf::strings_column_view const& input,
+  rmm::cuda_stream_view stream,
+  rmm::mr::device_memory_resource* mr)
+{
+  if (input.is_empty()) return cudf::make_empty_column(cudf::type_id::BOOL8);
+
+  auto out = cudf::make_fixed_width_column(cudf::data_type{cudf::type_id::BOOL8},
+                                                  input.size(),
+                                                  cudf::mask_state::UNALLOCATED,
+                                                  stream,
+                                                  mr);
+
+  auto outd = cudf::mutable_column_device_view::create(*out, stream);
+
+
+  constexpr int block_size = 512;
+  cudf::detail::grid_1d const grid{input.size(), block_size};
+  auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+  // preprocess sizes (returned in the offsets buffer)
+  validate_json_kernel<block_size>
+    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+        *outd);
+
+  return out;
+}
+
+
 }  // namespace detail
 
 std::unique_ptr<cudf::column> get_json_object(
@@ -1041,5 +1095,14 @@ std::unique_ptr<cudf::column> get_json_object(
 {
   return detail::get_json_object(input, instructions, stream, mr);
 }
+
+std::unique_ptr<cudf::column> validate_json(
+  cudf::strings_column_view const& input,
+  rmm::cuda_stream_view stream,
+  rmm::mr::device_memory_resource* mr)
+{
+  return detail::validate_json(input, stream, mr);
+}
+
 
 }  // namespace spark_rapids_jni
