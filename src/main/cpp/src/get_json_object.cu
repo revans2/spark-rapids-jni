@@ -888,9 +888,11 @@ __device__ bool validate_json_single(
   cudf::size_type input_len)
 {
   json_parser j_parser(input, input_len);
-  j_parser.next_token();
-  // JSON validation check
-  return json_token::ERROR != j_parser.get_current_token();
+  auto token = j_parser.next_token();
+  while (json_token::ERROR != token && json_token::SUCCESS != token) {
+    token = j_parser.next_token();
+  }
+  return json_token::SUCCESS == j_parser.get_current_token();
 }
 
 /**

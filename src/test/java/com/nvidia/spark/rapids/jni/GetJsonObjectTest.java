@@ -28,8 +28,10 @@ public class GetJsonObjectTest {
     try (ColumnVector cv = ColumnVector.fromStrings(
             "{}",
             "{\"a\": 100}",
-            "NOPE");
-         ColumnVector expected = ColumnVector.fromBooleans(true, true, false);
+            "NOPE",
+            "{\"a\": TRUE}",
+            "{\"a\": true}");
+         ColumnVector expected = ColumnVector.fromBooleans(true, true, false, false, true);
          ColumnVector found = JSONUtils.isJsonValid(cv)) {
       assertColumnsAreEqual(expected, found);
     }
