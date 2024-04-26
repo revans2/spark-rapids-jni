@@ -1059,8 +1059,172 @@ __launch_bounds__(block_size) CUDF_KERNEL
   }
 }
 
+
+class single_byte_reader {
+  public:
+  __device__ inline single_byte_reader(char const* const _json_start_pos, cudf::size_type const _json_len)
+    : json_start_pos(_json_start_pos),
+      json_end_pos(_json_start_pos + _json_len),
+      curr_pos(_json_start_pos)
+  {
+  }
+
+  __device__ inline bool eof() { return curr_pos >= json_end_pos; }
+  __device__ inline char current_char() { return *curr_pos; }
+  __device__ inline void advance() {curr_pos++; }
+ private:
+  char const* const json_start_pos;
+  char const* const json_end_pos;
+  char const* curr_pos;
+};
+
+class single_long_reader {
+  public:
+  __device__ inline single_long_reader(char const* const _json_start_pos, cudf::size_type const _json_len)
+    : json_start_pos(_json_start_pos),
+      json_len(_json_len),
+      curr_index(0)
+  {
+  }
+
+  __device__ inline bool eof() { return curr_index >= json_len; }
+  __device__ inline char current_char() { return json_start_pos[curr_index]; }
+  __device__ inline void advance() { curr_index++; }
+ private:
+  char const* const json_start_pos;
+  const cudf::size_type json_len;
+  cudf::size_type curr_index;
+  char buffer[8];
+};
+
+
+
+__device__ inline bool is_whitespace(char c)
+{
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+__device__ inline bool get_bit_value(int64_t number, int bitIndex)
+{
+  // Shift the number right by the bitIndex to bring the desired bit to the rightmost position
+  long shifted = number >> bitIndex;
+
+  // Extract the rightmost bit by performing a bitwise AND with 1
+  bool bit_value = shifted & 1;
+
+  return bit_value;
+}
+
+__device__ inline void set_bit_value(int64_t& number, int bit_index, bool bit_value)
+{
+  // Create a mask with a 1 at the desired bit index
+  long mask = 1L << bit_index;
+
+  if (bit_value) {
+    // Set the bit to 1 by performing a bitwise OR with the mask
+    number |= mask;
+  } else {
+    // Set the bit to 0 by performing a bitwise AND with the complement of the mask
+    number &= ~mask;
+  }
+}
+
+template<class READER>
+__device__ inline bool bobbys_json(READER & reader) {
+  long num_non_ws = 0;
+  long max_depth = 0;
+  int64_t is_obj_mask;
+  long current_depth = 0;
+  bool is_good = true;
+
+  while (!reader.eof()) {
+    auto c = reader.current_char();
+    if (!is_whitespace(c)) {
+      num_non_ws++;
+    }
+    if (c == '{' || c == '[') {
+      if (current_depth >= 64) {
+        is_good = false;
+      }
+      if (c == '{') {
+        set_bit_value(is_obj_mask, current_depth, true);
+      } else {
+        set_bit_value(is_obj_mask, current_depth, false);
+      }
+      current_depth++;
+      if (current_depth > max_depth) {
+        max_depth = current_depth;
+      }
+    } else if (c == '}' || c == ']') {
+      current_depth--;
+      if (current_depth < 0) {
+        is_good = false;
+        current_depth = 0;
+      }
+      if (c == '}' && !get_bit_value(is_obj_mask, current_depth)) {
+        is_good = false;
+      } else if ( c == ']' && get_bit_value(is_obj_mask, current_depth)) {
+        is_good = false;
+      }
+    }
+    reader.advance();
+  }
+  if (current_depth != 0) {
+    is_good = false;
+  }
+  return is_good && (((max_depth + num_non_ws) % 2) == 0);
+}
+
+__device__ inline bool bobbys_json_single_byte(
+  char const* input,
+  cudf::size_type input_len)
+{
+  single_byte_reader reader(input, input_len);
+  return bobbys_json(reader);
+}
+
+template <int block_size>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void bobbys_json_kernel_single_byte(cudf::column_device_view col,
+                                      cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+
+  while (tid < col.size()) {
+    cudf::string_view const str = col.element<cudf::string_view>(tid);
+    out.element<bool>(tid) = bobbys_json_single_byte(str.data(), str.size_bytes());
+    tid += stride;
+  }
+}
+
+
+__device__ inline bool bobbys_json_single_long(
+  char const* input,
+  cudf::size_type input_len)
+{
+  single_long_reader reader(input, input_len);
+  return bobbys_json(reader);
+}
+
+template <int block_size>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void bobbys_json_kernel_single_long(cudf::column_device_view col,
+                                      cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+
+  while (tid < col.size()) {
+    cudf::string_view const str = col.element<cudf::string_view>(tid);
+    out.element<bool>(tid) = bobbys_json_single_long(str.data(), str.size_bytes());
+    tid += stride;
+  }
+}
+
 std::unique_ptr<cudf::column> validate_json(
   cudf::strings_column_view const& input,
+  int id,
   rmm::cuda_stream_view stream,
   rmm::mr::device_memory_resource* mr)
 {
@@ -1075,14 +1239,44 @@ std::unique_ptr<cudf::column> validate_json(
   auto outd = cudf::mutable_column_device_view::create(*out, stream);
 
 
-  constexpr int block_size = 512;
-  cudf::detail::grid_1d const grid{input.size(), block_size};
-  auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
-  // preprocess sizes (returned in the offsets buffer)
-  validate_json_kernel<block_size>
-    <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
-        *outd);
+  switch(id) {
+    case 0:
+      {
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      validate_json_kernel<block_size>
+        <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+            *outd);
+      break;
+      }
+    case 1:
+      {
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_single_byte<block_size>
+        <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+            *outd);
+      break;
+      }
+    case 2:
+      {
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_single_long<block_size>
+        <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+            *outd);
+      break;
+      }
 
+    default:
+      throw std::runtime_error("UNSUPPORTED ID");
+  }
   return out;
 }
 
@@ -1100,10 +1294,11 @@ std::unique_ptr<cudf::column> get_json_object(
 
 std::unique_ptr<cudf::column> validate_json(
   cudf::strings_column_view const& input,
+  int id,
   rmm::cuda_stream_view stream,
   rmm::mr::device_memory_resource* mr)
 {
-  return detail::validate_json(input, stream, mr);
+  return detail::validate_json(input, id, stream, mr);
 }
 
 

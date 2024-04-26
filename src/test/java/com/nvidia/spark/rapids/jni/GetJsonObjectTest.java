@@ -37,6 +37,42 @@ public class GetJsonObjectTest {
     }
   }
 
+  @Test
+  void validJsonTestID1() {
+    try (ColumnVector cv = ColumnVector.fromStrings(
+            "{}",
+            "{\"a\": 100}",
+            "NOPE",
+            "{\"a\": TRUE}",
+            "{\"a\": true}",
+            "[{}]",
+            "[}",
+            "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]"
+            );
+         ColumnVector expected = ColumnVector.fromBooleans(false, true, true, false, false, true, false, false);
+         ColumnVector found = JSONUtils.isJsonValid(cv, 1)) {
+      assertColumnsAreEqual(expected, found);
+    }
+  }
+
+  @Test
+  void validJsonTestID2() {
+    try (ColumnVector cv = ColumnVector.fromStrings(
+            "{}",
+            "{\"a\": 100}",
+            "NOPE",
+            "{\"a\": TRUE}",
+            "{\"a\": true}",
+            "[{}]",
+            "[}",
+            "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]"
+    );
+         ColumnVector expected = ColumnVector.fromBooleans(false, true, true, false, false, true, false, false);
+         ColumnVector found = JSONUtils.isJsonValid(cv, 2)) {
+      assertColumnsAreEqual(expected, found);
+    }
+  }
+
   /**
    * Test: query is $.k
    */

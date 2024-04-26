@@ -69,7 +69,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject
 }
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_isJsonValid(
-  JNIEnv* env, jclass, jlong input_column)
+  JNIEnv* env, jclass, jlong input_column, jint id)
 {
   JNI_NULL_CHECK(env, input_column, "input column is null", 0);
   try {
@@ -78,7 +78,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_isJsonValid(
     auto const n_strings_col_view = cudf::strings_column_view{*n_column_view};
 
     return cudf::jni::release_as_jlong(
-      spark_rapids_jni::validate_json(n_strings_col_view));
+      spark_rapids_jni::validate_json(n_strings_col_view, id));
   }
   CATCH_STD(env, 0);
 }

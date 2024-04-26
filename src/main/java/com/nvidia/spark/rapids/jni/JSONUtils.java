@@ -54,10 +54,15 @@ public class JSONUtils {
 
   public static ColumnVector isJsonValid(ColumnVector input) {
     assert(input.getType().equals(DType.STRING)) : "column must be a String";
-    return new ColumnVector(isJsonValid(input.getNativeView()));
+    return new ColumnVector(isJsonValid(input.getNativeView(), 0));
+  }
+
+  public static ColumnVector isJsonValid(ColumnVector input, int id) {
+    assert(input.getType().equals(DType.STRING)) : "column must be a String";
+    return new ColumnVector(isJsonValid(input.getNativeView(), id));
   }
 
   private static native long getJsonObject(long input, PathInstructionJni[] path_instructions);
 
-  private static native long isJsonValid(long input);
+  private static native long isJsonValid(long input, int id);
 }

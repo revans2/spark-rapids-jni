@@ -50,6 +50,7 @@ std::unique_ptr<cudf::column> get_json_object(
 
 std::unique_ptr<cudf::column> validate_json(
   cudf::strings_column_view const& input,
+  int id,
   rmm::cuda_stream_view stream        = cudf::get_default_stream(),
   rmm::mr::device_memory_resource* mr = rmm::mr::get_current_device_resource());
 
