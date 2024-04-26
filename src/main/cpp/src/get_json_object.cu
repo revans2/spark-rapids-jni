@@ -1078,26 +1078,58 @@ class single_byte_reader {
   char const* curr_pos;
 };
 
-class single_long_reader {
+template<int buffer_size>
+class buffer_reader {
   public:
-  __device__ inline single_long_reader(char const* const _json_start_pos, cudf::size_type const _json_len)
+  __device__ inline buffer_reader(char const* const _json_start_pos, cudf::size_type const _json_len)
     : json_start_pos(_json_start_pos),
       json_len(_json_len),
       curr_index(0)
   {
+    buffer_next();
   }
 
   __device__ inline bool eof() { return curr_index >= json_len; }
-  __device__ inline char current_char() { return json_start_pos[curr_index]; }
-  __device__ inline void advance() { curr_index++; }
+  __device__ inline char current_char() {
+    auto buffer_index = curr_index - buffer_starts_at;
+    return buffer[buffer_index];
+  }
+
+  __device__ inline void advance() { 
+    curr_index++;
+    buffer_next();
+  }
  private:
+
+  __device__ inline void buffer_next() {
+    //printf("BUFFER NEXT START BUFFER %i - %i JSON 0 - %i - %i\n", buffer_starts_at, buffer_ends_at,
+    //    curr_index, json_len);
+    if (curr_index >= buffer_ends_at && curr_index < json_len) {
+      // We need to buffer some more data
+      // For now we are going to ignore aligned access and just
+      // load some data
+      cudf::size_type bytes_needed = json_len - buffer_ends_at;
+      if (bytes_needed > buffer_size) {
+        bytes_needed = buffer_size;
+      }
+      buffer_starts_at = buffer_ends_at;
+      buffer_ends_at = buffer_starts_at + bytes_needed;
+      for (int i = 0; i < bytes_needed; i++) {
+        buffer[i] = json_start_pos[i + buffer_starts_at];
+        //printf("BUFFER[%i] = JSON[%i] = %c\n", i , i + buffer_starts_at, buffer[i]);
+      }
+    }
+    //printf("BUFFER NEXT END BUFFER %i - %i JSON 0 - %i - %i\n", buffer_starts_at, buffer_ends_at,
+    //    curr_index, json_len);
+  }
+
   char const* const json_start_pos;
   const cudf::size_type json_len;
   cudf::size_type curr_index;
-  char buffer[8];
+  cudf::size_type buffer_starts_at = 0;
+  cudf::size_type buffer_ends_at = 0;
+  char buffer[buffer_size];
 };
-
-
 
 __device__ inline bool is_whitespace(char c)
 {
@@ -1203,7 +1235,7 @@ __device__ inline bool bobbys_json_single_long(
   char const* input,
   cudf::size_type input_len)
 {
-  single_long_reader reader(input, input_len);
+  buffer_reader<8> reader(input, input_len);
   return bobbys_json(reader);
 }
 
@@ -1218,6 +1250,29 @@ __launch_bounds__(block_size) CUDF_KERNEL
   while (tid < col.size()) {
     cudf::string_view const str = col.element<cudf::string_view>(tid);
     out.element<bool>(tid) = bobbys_json_single_long(str.data(), str.size_bytes());
+    tid += stride;
+  }
+}
+
+__device__ inline bool bobbys_json_64_bytes(
+  char const* input,
+  cudf::size_type input_len)
+{
+  buffer_reader<64> reader(input, input_len);
+  return bobbys_json(reader);
+}
+
+template <int block_size>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void bobbys_json_kernel_64_bytes(cudf::column_device_view col,
+                                      cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+
+  while (tid < col.size()) {
+    cudf::string_view const str = col.element<cudf::string_view>(tid);
+    out.element<bool>(tid) = bobbys_json_64_bytes(str.data(), str.size_bytes());
     tid += stride;
   }
 }
@@ -1269,6 +1324,17 @@ std::unique_ptr<cudf::column> validate_json(
       auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
       // preprocess sizes (returned in the offsets buffer)
       bobbys_json_kernel_single_long<block_size>
+        <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+            *outd);
+      break;
+      }
+    case 3:
+      {
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_64_bytes<block_size>
         <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
             *outd);
       break;
