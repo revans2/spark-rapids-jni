@@ -117,6 +117,52 @@ public class GetJsonObjectTest {
     }
   }
 
+  @Test
+  void validJsonTestID5() {
+    StringBuilder padding = new StringBuilder();
+    for (int i = 0; i < 128; i++) {
+      //padding.append(i%10);
+      padding.append(' ');
+    }
+    try (ColumnVector cv = ColumnVector.fromStrings(
+            "{}" + padding,
+            "{\"a\": 100}" + padding,
+            "NOPE",
+            "{\"a\": TRUE}",
+            "{\"a\": true}",
+            padding + "[{}]",
+            "[}",
+            "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]" + padding
+    );
+         ColumnVector expected = ColumnVector.fromBooleans(false, true, true, false, false, true, false, false);
+         ColumnVector found = JSONUtils.isJsonValid(cv, 5)) {
+      assertColumnsAreEqual(expected, found);
+    }
+  }
+
+  @Test
+  void validJsonTestID6() {
+    StringBuilder padding = new StringBuilder();
+    for (int i = 0; i < 128; i++) {
+      //padding.append(i%10);
+      padding.append(' ');
+    }
+    try (ColumnVector cv = ColumnVector.fromStrings(
+            "{}" + padding,
+            "{\"a\": 100}" + padding,
+            "NOPE",
+            "{\"a\": TRUE}",
+            "{\"a\": true}",
+            padding + "[{}]",
+            "[}",
+            "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]" + padding
+    );
+         ColumnVector expected = ColumnVector.fromBooleans(false, true, true, false, false, true, false, false);
+         ColumnVector found = JSONUtils.isJsonValid(cv, 6)) {
+      assertColumnsAreEqual(expected, found);
+    }
+  }
+
   /**
    * Test: query is $.k
    */

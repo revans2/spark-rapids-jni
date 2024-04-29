@@ -1164,7 +1164,94 @@ class aligned_buffer_reader {
   uint64_t buffer[buffer_size/8];
 };
 
+class aligned_buffer_reader_shared {
+  public:
+  __device__ inline aligned_buffer_reader_shared(char const* const _json_start_pos,
+      cudf::size_type const _json_len,
+      uint64_t * buffer,
+      cudf::size_type const buffer_len
+      )
+    : json_start_pos(_json_start_pos),
+      json_len(_json_len),
+      curr_index(0),
+      buffer_size_bytes(buffer_len * 8),
+      buffer(buffer)
+  {
+    buffer_next();
+  }
 
+  __device__ inline bool eof() { return curr_index >= json_len; }
+  __device__ inline char current_char() {
+    auto buffer_index = curr_index - buffer_starts_at;
+    char * char_buffer = reinterpret_cast<char*>(buffer);
+    auto ret = char_buffer[buffer_index];
+    //printf("READ CHAR '%c' AT %i %i\n", ret, curr_index, buffer_index);
+    return ret;
+  }
+
+  __device__ inline void advance() { 
+    curr_index++;
+    buffer_next();
+  }
+ private:
+  __device__ inline const char* align(const char* ptr) {
+    return reinterpret_cast<const char *>((reinterpret_cast<uint64_t>(ptr) + 7) & ~7);
+  }
+
+  __device__ inline cudf::size_type bytes_to_next_long(const char * ptr) {
+    auto aligned = align(ptr);
+    return aligned - ptr;
+  }
+
+  __device__ inline void buffer_next() {
+    //printf("BUFFER NEXT START BUFFER %i to %i JSON %i to %i\n", buffer_starts_at, buffer_ends_at,
+    //    curr_index, json_len);
+    if (curr_index >= buffer_ends_at && curr_index < json_len) {
+      // We need to buffer some more data
+      // For now we are going to ignore aligned access and just
+      // load some data
+      cudf::size_type bytes_needed = json_len - buffer_ends_at;
+      auto to_align = bytes_to_next_long(&json_start_pos[curr_index]);
+      //printf("TO ALIGN %i\n", to_align);
+      if (to_align != 0 && bytes_needed > to_align) {
+        bytes_needed = to_align;
+      }
+      if (bytes_needed > buffer_size_bytes) {
+        bytes_needed = buffer_size_bytes;
+      }
+      buffer_starts_at = buffer_ends_at;
+      buffer_ends_at = buffer_starts_at + bytes_needed;
+
+      //printf("BUFFER NEXT MID BUFFER %i to %i JSON %i to %i\n", buffer_starts_at, buffer_ends_at,
+      //  curr_index, json_len);
+      if (to_align > 0 || (bytes_needed % 8) != 0) {
+        char * to_ptr = reinterpret_cast<char*>(buffer);
+        for (int i = 0; i < bytes_needed; i++) {
+          to_ptr[i] = json_start_pos[i + buffer_starts_at];
+          //printf("BUFFER[%i] = JSON[%i] = %c\n", i , i + buffer_starts_at, to_ptr[i]);
+        }
+      } else {
+        // We can read it all as longs!!!
+        const uint64_t * from_ptr = reinterpret_cast<const uint64_t *>(&json_start_pos[curr_index]);
+        for (int i = 0; i < bytes_needed / 8; i++) {
+          // endianness worked out for us. No fixup needed...
+          buffer[i] = from_ptr[i];
+          //printf("LONG BUFFER[%i] = JSON[%i] = %lX\n", i, i, buffer[i]);
+        }
+      }
+    }
+    //printf("BUFFER NEXT END BUFFER %i to %i JSON %i to %i\n", buffer_starts_at, buffer_ends_at,
+    //    curr_index, json_len);
+  }
+
+  char const* const json_start_pos;
+  const cudf::size_type json_len;
+  cudf::size_type curr_index;
+  uint64_t *buffer;
+  const cudf::size_type buffer_size_bytes;
+  cudf::size_type buffer_starts_at = 0;
+  cudf::size_type buffer_ends_at = 0;
+};
 
 template<int buffer_size>
 class buffer_reader {
@@ -1319,6 +1406,28 @@ __launch_bounds__(block_size) CUDF_KERNEL
 }
 
 
+template <int block_size, int rows_per_thread>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void bobbys_json_kernel_single_byte_rows_per_thread(cudf::column_device_view col,
+                                      cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+
+  int start_row_idx = tid * rows_per_thread;
+  int end_row_idx   = (tid + 1) * rows_per_thread;
+
+  while (tid * rows_per_thread < col.size()) {
+    for (int row_idx = start_row_idx; row_idx < end_row_idx; ++row_idx) {
+      if (row_idx < col.size()) {
+        cudf::string_view const str = col.element<cudf::string_view>(row_idx);
+        out.element<bool>(row_idx) = bobbys_json_single_byte(str.data(), str.size_bytes());
+      }
+    }
+    tid += stride;
+  }
+}
+
 __device__ inline bool bobbys_json_single_long(
   char const* input,
   cudf::size_type input_len)
@@ -1384,6 +1493,35 @@ __launch_bounds__(block_size) CUDF_KERNEL
   while (tid < col.size()) {
     cudf::string_view const str = col.element<cudf::string_view>(tid);
     out.element<bool>(tid) = bobbys_json_aligned_64_bytes(str.data(), str.size_bytes());
+    tid += stride;
+  }
+}
+
+__device__ inline bool bobbys_json_aligned_shared(
+  char const* input,
+  cudf::size_type input_len,
+  uint64_t * shared,
+  cudf::size_type shared_len)
+{
+  aligned_buffer_reader_shared reader(input, input_len, shared, shared_len);
+  return bobbys_json(reader);
+}
+
+template <int block_size, int longs_shared_per_thread>
+__launch_bounds__(block_size) CUDF_KERNEL
+  void bobbys_json_kernel_aligned_shared(cudf::column_device_view col,
+                                      cudf::mutable_column_device_view out)
+{
+  auto tid          = cudf::detail::grid_1d::global_thread_id();
+  auto const stride = cudf::detail::grid_1d::grid_stride();
+  extern __shared__ uint64_t shared_data[];
+
+  auto shared_index = (tid % 32) * longs_shared_per_thread;
+  auto shared_addr = &shared_data[shared_index];
+  while (tid < col.size()) {
+    cudf::string_view const str = col.element<cudf::string_view>(tid);
+    out.element<bool>(tid) = bobbys_json_aligned_shared(str.data(), str.size_bytes(),
+        shared_addr, longs_shared_per_thread);
     tid += stride;
   }
 }
@@ -1463,7 +1601,35 @@ std::unique_ptr<cudf::column> validate_json(
             *outd);
       break;
       }
+    case 5:
+      {
+        // Really bad do not use!!!
+      constexpr int block_size = 128;
+      constexpr int rows_per_thread = 32;
+      cudf::detail::grid_1d const grid{input.size(), block_size, rows_per_thread};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_single_byte_rows_per_thread<block_size, rows_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, 0, stream.value()>>>(*d_input_ptr,
+            *outd);
+      break;
+      }
+    case 6:
+      {
+      // Try to use shared memory, we will start with 64 bytes per row, similar to before.
+      // This is 32 threads per warp, each with 64 bytes in it.
+      constexpr int shared_longs_per_thread = 8;
+      constexpr int shared_size = shared_longs_per_thread * 8 * 32;
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
 
+      break;
+      }
 
     default:
       throw std::runtime_error("UNSUPPORTED ID");
