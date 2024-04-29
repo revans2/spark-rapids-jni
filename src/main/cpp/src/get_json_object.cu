@@ -1630,6 +1630,22 @@ std::unique_ptr<cudf::column> validate_json(
 
       break;
       }
+    case 7:
+      {
+      // Lets try 128 bytes per thread.
+      constexpr int shared_longs_per_thread = 16;
+      constexpr int shared_size = shared_longs_per_thread * 8 * 32;
+      constexpr int block_size = 512;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
+
+      break;
+      }
+
 
     default:
       throw std::runtime_error("UNSUPPORTED ID");
