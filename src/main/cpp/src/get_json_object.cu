@@ -1516,7 +1516,7 @@ __launch_bounds__(block_size) CUDF_KERNEL
   auto const stride = cudf::detail::grid_1d::grid_stride();
   extern __shared__ uint64_t shared_data[];
 
-  auto shared_index = (tid % 32) * longs_shared_per_thread;
+  auto shared_index = (tid % block_size) * longs_shared_per_thread;
   auto shared_addr = &shared_data[shared_index];
   while (tid < col.size()) {
     cudf::string_view const str = col.element<cudf::string_view>(tid);
@@ -1617,10 +1617,9 @@ std::unique_ptr<cudf::column> validate_json(
     case 6:
       {
       // Try to use shared memory, we will start with 64 bytes per row, similar to before.
-      // This is 32 threads per warp, each with 64 bytes in it.
       constexpr int shared_longs_per_thread = 8;
-      constexpr int shared_size = shared_longs_per_thread * 8 * 32;
-      constexpr int block_size = 512;
+      constexpr int block_size = 32;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
       cudf::detail::grid_1d const grid{input.size(), block_size};
       auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
       // preprocess sizes (returned in the offsets buffer)
@@ -1634,8 +1633,8 @@ std::unique_ptr<cudf::column> validate_json(
       {
       // Lets try 128 bytes per thread.
       constexpr int shared_longs_per_thread = 16;
-      constexpr int shared_size = shared_longs_per_thread * 8 * 32;
-      constexpr int block_size = 512;
+      constexpr int block_size = 32;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
       cudf::detail::grid_1d const grid{input.size(), block_size};
       auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
       // preprocess sizes (returned in the offsets buffer)
@@ -1645,7 +1644,66 @@ std::unique_ptr<cudf::column> validate_json(
 
       break;
       }
+    case 8:
+      {
+      // Lets try 32 bytes per thread.
+      constexpr int shared_longs_per_thread = 4;
+      constexpr int block_size = 32;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
 
+      break;
+      }
+    case 9:
+      {
+      // Lets try 16 bytes per thread.
+      constexpr int shared_longs_per_thread = 2;
+      constexpr int block_size = 32;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
+
+      break;
+      }
+    case 10:
+      {
+      // Lets try 8 bytes per thread.
+      constexpr int shared_longs_per_thread = 1;
+      constexpr int block_size = 32;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
+
+      break;
+      }
+    case 11:
+      {
+      // Lets try a block size of 128, as suggested by ncu
+      constexpr int shared_longs_per_thread = 8;
+      constexpr int block_size = 128;
+      constexpr int shared_size = shared_longs_per_thread * sizeof(uint64_t) * block_size;
+      cudf::detail::grid_1d const grid{input.size(), block_size};
+      auto d_input_ptr = cudf::column_device_view::create(input.parent(), stream);
+      // preprocess sizes (returned in the offsets buffer)
+      bobbys_json_kernel_aligned_shared<block_size, shared_longs_per_thread>
+        <<<grid.num_blocks, grid.num_threads_per_block, shared_size, stream.value()>>>(*d_input_ptr,
+            *outd);
+
+      break;
+      }
 
     default:
       throw std::runtime_error("UNSUPPORTED ID");
