@@ -289,6 +289,7 @@ std::unique_ptr<cudf::column> different_get_json_object(
   {
     CUDF_FUNC_RANGE();
     cudf::io::json::detail::normalize_single_quotes(buffer, stream, mr);
+    stream.synchronize();
   }
   //print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
   //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
