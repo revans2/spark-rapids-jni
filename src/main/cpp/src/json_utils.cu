@@ -172,6 +172,20 @@ rmm::device_uvector<cudf::io::json::SymbolT> extract_character_buffer(cudf::colu
   return ret;
 }
 
+rmm::device_uvector<cudf::io::json::SymbolT> just_concat(cudf::column_view const& input,
+    rmm::cuda_stream_view stream,
+    rmm::mr::device_memory_resource* mr) {
+  CUDF_FUNC_RANGE();
+  auto const input_scv  = cudf::strings_column_view{input};
+
+  auto all_done = cudf::strings::join_strings(input_scv,
+      cudf::string_scalar("\n", true, stream, mr),
+      cudf::string_scalar("{}", true, stream, mr),
+      stream,
+      mr);
+  return extract_character_buffer(*all_done, stream, mr);
+}
+
 std::pair<rmm::device_uvector<cudf::io::json::SymbolT>, std::unique_ptr<cudf::column>> clean_and_concat(
     cudf::column_view const& input,
     rmm::cuda_stream_view stream,
@@ -223,9 +237,10 @@ std::unique_ptr<cudf::column> tokenize_json(
   }
 
   auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
-  print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
-  cleaned = cudf::io::json::detail::normalize_single_quotes(std::move(cleaned), stream, mr);
-  print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
+  //print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
+  cudf::io::datasource::owning_buffer<rmm::device_uvector<cudf::io::json::SymbolT>> buffer{std::move(cleaned)};
+  cudf::io::json::detail::normalize_single_quotes(buffer, stream, mr);
+  //print_debug<char, char>(buffer, "QUOTE NORMALIZED", "", stream);
   //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
   //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
   // We will probably do ws normalization as we write out the data. This is true for number normalization too
@@ -236,14 +251,15 @@ std::unique_ptr<cudf::column> tokenize_json(
     .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
     .build();
 
+/*
   auto const [tokens, token_indices] = cudf::io::json::detail::get_token_stream(
-    cudf::device_span<char const>{cleaned.data(), cleaned.size()},
+    cudf::device_span<char const>{buffer.data(), buffer.size()},
     json_opts,
     stream,
     mr);
 
   print_debug_tokens(tokens, token_indices, cleaned, "RAW TOKES", "\n", stream);
-
+*/
 
   // TODO would a tree representation be better???
 
@@ -266,16 +282,20 @@ std::unique_ptr<cudf::column> different_get_json_object(
   rmm::mr::device_memory_resource* mr) {
 
   CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Invalid input format");
-  CUDF_FUNC_RANGE();
 
-  auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
+  cudf::io::datasource::owning_buffer<rmm::device_uvector<cudf::io::json::SymbolT>> buffer{std::move(just_concat(input, stream, mr))};
+  //auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
   //print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
-  cleaned = cudf::io::json::detail::normalize_single_quotes(std::move(cleaned), stream, mr);
+  {
+    CUDF_FUNC_RANGE();
+    cudf::io::json::detail::normalize_single_quotes(buffer, stream, mr);
+  }
   //print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
   //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
   //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
   // We will probably do ws normalization as we write out the data. This is true for number normalization too
 
+/*
   auto json_opts = cudf::io::json_reader_options_builder()
     .lines(true)
     .mixed_types_as_string(true)
@@ -287,7 +307,7 @@ std::unique_ptr<cudf::column> different_get_json_object(
     json_opts,
     stream,
     mr);
-
+*/
   // TODO this is just for profiling for now. Lets return an empty string column...
   auto rows = input.size();
   auto str_scalar = cudf::make_string_scalar("TODO FIX ME!!!!", stream, mr);
