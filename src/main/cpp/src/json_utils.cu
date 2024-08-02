@@ -152,7 +152,7 @@ bool contains_char(
   cudf::string_scalar s(needle, true, stream, mr);
   auto has_s = cudf::strings::contains(cudf::strings_column_view(input), s);
   auto any = cudf::make_any_aggregation<cudf::reduce_aggregation>();
-  auto ret = cudf::reduce(*has_s, *any, cudf::data_type{cudf::type_id::BOOL8}, mr); // no stream is supported for reduce yet
+  auto ret = cudf::reduce(*has_s, *any, cudf::data_type{cudf::type_id::BOOL8}, stream, mr);
   using BoolScalarType = cudf::scalar_type_t<bool>;
   return ret->is_valid(stream) && reinterpret_cast<BoolScalarType *>(ret.get())->value(stream);
 }
@@ -213,36 +213,33 @@ std::pair<rmm::device_uvector<cudf::io::json::SymbolT>, std::unique_ptr<cudf::co
   return std::make_pair(extract_character_buffer(*all_done, stream, mr), std::move(is_n_or_e));
 }
 
-std::unique_ptr<cudf::column> tokenize_json(
+void tokenize_json(
   cudf::column_view const& input,
   rmm::cuda_stream_view stream,
   rmm::mr::device_memory_resource* mr) {
 
+  CUDF_FUNC_RANGE();
   CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Invalid input format");
 
   if (input.is_empty()) {
-    auto tok_out = cudf::make_empty_column(cudf::type_id::INT8);
-    auto offset_out = cudf::make_empty_column(cudf::type_id::UINT32);
-    std::vector<std::unique_ptr<cudf::column>> tok_off_children;
-    tok_off_children.push_back(std::move(tok_out));
-    tok_off_children.push_back(std::move(offset_out));
-    auto tok_off_out = cudf::make_structs_column(0, std::move(tok_off_children), 0, rmm::device_buffer{}, stream, mr);
-    auto empty_offsets = cudf::make_empty_column(cudf::type_id::INT32);
-    auto tokens_out = cudf::make_lists_column(0, std::move(empty_offsets), std::move(tok_off_out), 0, rmm::device_buffer{}, stream, mr);
-    auto buffer_out = cudf::make_empty_column(cudf::type_id::STRING);
-    std::vector<std::unique_ptr<cudf::column>> children;
-    children.push_back(std::move(buffer_out));
-    children.push_back(std::move(tokens_out));
-    return cudf::make_structs_column(0, std::move(children), 0, rmm::device_buffer{}, stream, mr);
+    std::cerr << "INPUT EMPTY..." << std::endl;
+    // Nothing to do here...
+    return;
   }
+  std::cerr << "HAS INPUT" << std::endl;
 
   auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
+  stream.synchronize();
+  std::cerr << "CONCAT DONE" << std::endl;
   //print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
-  cudf::io::datasource::owning_buffer<rmm::device_uvector<cudf::io::json::SymbolT>> buffer{std::move(cleaned)};
-  cudf::io::json::detail::normalize_single_quotes(buffer, stream, mr);
-  //print_debug<char, char>(buffer, "QUOTE NORMALIZED", "", stream);
-  //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
-  //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
+  cudf::io::datasource::owning_buffer<rmm::device_uvector<cudf::io::json::SymbolT>> bufview{std::move(cleaned)};
+  cudf::io::json::detail::normalize_single_quotes(bufview, stream, mr);
+
+  stream.synchronize();
+  std::cerr << "QUOTES NORMALIZED" << std::endl;
+  //print_debug<char, char>(bufview, "QUOTE NORMALIZED", "", stream);
+  //cudf::io::json::detail::normalize_whitespace(bufview, stream, mr);
+  //print_debug<char, char>(bufview, "WS NORMALIZED", "", stream);
   // We will probably do ws normalization as we write out the data. This is true for number normalization too
 
   auto json_opts = cudf::io::json_reader_options_builder()
@@ -251,69 +248,19 @@ std::unique_ptr<cudf::column> tokenize_json(
     .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
     .build();
 
-/*
+  auto buffer =
+    cudf::device_span<char const>(reinterpret_cast<char const*>(bufview.data()), bufview.size());
+
   auto const [tokens, token_indices] = cudf::io::json::detail::get_token_stream(
-    cudf::device_span<char const>{buffer.data(), buffer.size()},
+    buffer,
     json_opts,
     stream,
     mr);
 
-  print_debug_tokens(tokens, token_indices, cleaned, "RAW TOKES", "\n", stream);
-*/
-
-  // TODO would a tree representation be better???
-
-
-  // TODO we probably want a JSON options to pass in at some point. For now we are
-  // just going to hard code thigns...
-
-  // First off we need to get all of the data into a single buffer.  In the future
-  // This will use \0 nul as the separator, but for now we are going to use \n
-  // and check that it is not in there...
-
-  throw std::runtime_error("NOT IMPLEMENTED YET");
+  stream.synchronize();
+  std::cerr << "TOKEN STREAM DONE" << std::endl;
+  //print_debug_tokens(tokens, token_indices, cleaned, "RAW TOKES", "\n", stream);
+  std::cerr << "ALL DONE" << std::endl;
 }
-
-
-std::unique_ptr<cudf::column> different_get_json_object(
-  cudf::column_view const& input,
-  std::vector<std::tuple<diff_path_instruction_type, std::string, int64_t>> const& instructions,
-  rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr) {
-
-  CUDF_EXPECTS(input.type().id() == cudf::type_id::STRING, "Invalid input format");
-
-  cudf::io::datasource::owning_buffer<rmm::device_uvector<cudf::io::json::SymbolT>> buffer{std::move(just_concat(input, stream, mr))};
-  //auto [cleaned, was_empty] = clean_and_concat(input, stream, mr);
-  //print_debug<char, char>(cleaned, "CLEANED INPUT", "", stream);
-  {
-    CUDF_FUNC_RANGE();
-    cudf::io::json::detail::normalize_single_quotes(buffer, stream, mr);
-    stream.synchronize();
-  }
-  //print_debug<char, char>(cleaned, "QUOTE NORMALIZED", "", stream);
-  //cleaned = cudf::io::json::detail::normalize_whitespace(std::move(cleaned), stream, mr);
-  //print_debug<char, char>(cleaned, "WS NORMALIZED", "", stream);
-  // We will probably do ws normalization as we write out the data. This is true for number normalization too
-
-/*
-  auto json_opts = cudf::io::json_reader_options_builder()
-    .lines(true)
-    .mixed_types_as_string(true)
-    .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
-    .build();
-
-  auto const [tokens, token_indices] = cudf::io::json::detail::get_token_stream(
-    cudf::device_span<char const>{cleaned.data(), cleaned.size()},
-    json_opts,
-    stream,
-    mr);
-*/
-  // TODO this is just for profiling for now. Lets return an empty string column...
-  auto rows = input.size();
-  auto str_scalar = cudf::make_string_scalar("TODO FIX ME!!!!", stream, mr);
-  return cudf::make_column_from_scalar(*str_scalar, rows, stream, mr);
-}
-
 
 }  // namespace spark_rapids_jni

@@ -77,65 +77,6 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObject(JNIEnv* env,
   CATCH_STD(env, 0);
 }
 
-JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_differentGetJsonObject(
-  JNIEnv* env, jclass, jlong input_column, jobjectArray path_instructions)
-{
-  JNI_NULL_CHECK(env, input_column, "input column is null", 0);
-  JNI_NULL_CHECK(env, path_instructions, "path_instructions is null", 0);
-  try {
-    cudf::jni::auto_set_device(env);
-    auto const n_column_view      = reinterpret_cast<cudf::column_view const*>(input_column);
-
-    std::vector<std::tuple<spark_rapids_jni::diff_path_instruction_type, std::string, int64_t>> instructions;
-    int size = env->GetArrayLength(path_instructions);
-    for (int i = 0; i < size; i++) {
-      jobject instruction = env->GetObjectArrayElement(path_instructions, i);
-      JNI_NULL_CHECK(env, instruction, "path_instruction is null", 0);
-      jclass instruction_class = env->GetObjectClass(instruction);
-      JNI_NULL_CHECK(env, instruction_class, "instruction_class is null", 0);
-
-      jfieldID field_id = env->GetFieldID(instruction_class, "type", "I");
-      JNI_NULL_CHECK(env, field_id, "field_id is null", 0);
-      jint type                              = env->GetIntField(instruction, field_id);
-      spark_rapids_jni::diff_path_instruction_type instruction_type = static_cast<spark_rapids_jni::diff_path_instruction_type>(type);
-
-      field_id = env->GetFieldID(instruction_class, "name", "Ljava/lang/String;");
-      JNI_NULL_CHECK(env, field_id, "field_id is null", 0);
-      jstring name = (jstring)env->GetObjectField(instruction, field_id);
-      JNI_NULL_CHECK(env, name, "name is null", 0);
-      const char* name_str = env->GetStringUTFChars(name, JNI_FALSE);
-
-      field_id = env->GetFieldID(instruction_class, "index", "J");
-      JNI_NULL_CHECK(env, field_id, "field_id is null", 0);
-      jlong index = env->GetLongField(instruction, field_id);
-
-      instructions.emplace_back(instruction_type, name_str, index);
-
-      env->ReleaseStringUTFChars(name, name_str);
-    }
-
-    return cudf::jni::release_as_jlong(
-      spark_rapids_jni::different_get_json_object(*n_column_view, instructions));
-  }
-  CATCH_STD(env, 0);
-}
-
-
-
-JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_tokenizeJson(
-  JNIEnv* env, jclass, jlong input_column)
-{
-  JNI_NULL_CHECK(env, input_column, "input column is null", 0);
-  try {
-    cudf::jni::auto_set_device(env);
-    auto const n_column_view      = reinterpret_cast<cudf::column_view const*>(input_column);
-
-    return cudf::jni::release_as_jlong(
-      spark_rapids_jni::tokenize_json(*n_column_view));
-  }
-  CATCH_STD(env, 0);
-}
-
 JNIEXPORT jlongArray JNICALL
 Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* env,
                                                                       jclass,
@@ -197,4 +138,17 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_getJsonObjectMultiplePaths(JNIEnv* en
   }
   CATCH_STD(env, 0);
 }
+
+JNIEXPORT void JNICALL Java_com_nvidia_spark_rapids_jni_JSONUtils_tokenizeJson(
+  JNIEnv* env, jclass, jlong input_column)
+{
+  JNI_NULL_CHECK(env, input_column, "input column is null",);
+  try {
+    cudf::jni::auto_set_device(env);
+    auto const n_column_view      = reinterpret_cast<cudf::column_view const*>(input_column);
+    spark_rapids_jni::tokenize_json(*n_column_view);
+  }
+  CATCH_STD(env,);
+}
+
 }

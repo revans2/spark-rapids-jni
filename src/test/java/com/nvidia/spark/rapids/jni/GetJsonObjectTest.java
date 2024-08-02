@@ -18,11 +18,6 @@ package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
 import ai.rapids.cudf.CudfException;
-import ai.rapids.cudf.DType;
-import ai.rapids.cudf.HostColumnVector;
-import org.junit.jupiter.api.Test;
-
-import java.util.Arrays;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -33,19 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class GetJsonObjectTest {
 
-/*
   @Test
   void emptyTokenizeTest() {
-    HostColumnVector.DataType bufferDt = new HostColumnVector.BasicType(false, DType.STRING);
-    HostColumnVector.DataType tokenDt = new HostColumnVector.BasicType(false, DType.INT8);
-    HostColumnVector.DataType offsetDt = new HostColumnVector.BasicType(false, DType.UINT32);
-    HostColumnVector.DataType elementDt = new HostColumnVector.StructType(true, tokenDt, offsetDt);
-    HostColumnVector.DataType tokensDt = new HostColumnVector.ListType(false, elementDt);
-    HostColumnVector.DataType returnDt = new HostColumnVector.StructType(true, bufferDt, tokensDt);
-    try (ColumnVector jsonCv = ColumnVector.fromStrings();
-         ColumnVector expected = ColumnVector.fromStructs(returnDt);
-         ColumnVector actual = JSONUtils.tokenizeJson(jsonCv)) {
-      assertColumnsAreEqual(expected, actual);
+    try (ColumnVector jsonCv = ColumnVector.fromStrings()) {
+      JSONUtils.tokenizeJson(jsonCv);
     }
   }
 
@@ -54,34 +40,22 @@ public class GetJsonObjectTest {
     try (ColumnVector jsonCv = ColumnVector.fromStrings(
             "{'key': \"val\\bue\" ,\n\"ARRAY\" : [ 1.0 , 2.0, 3 , 44.01 ]}")) {
       assertThrows(CudfException.class, () -> {
-        JSONUtils.tokenizeJson(jsonCv).close();
+        JSONUtils.tokenizeJson(jsonCv);
       });
     }
   }
 
   @Test
   void simpleTokenizeTest() {
-    HostColumnVector.DataType bufferDt = new HostColumnVector.BasicType(false, DType.STRING);
-    HostColumnVector.DataType tokenDt = new HostColumnVector.BasicType(false, DType.INT8);
-    HostColumnVector.DataType offsetDt = new HostColumnVector.BasicType(false, DType.UINT32);
-    HostColumnVector.DataType elementDt = new HostColumnVector.StructType(true, tokenDt, offsetDt);
-    HostColumnVector.DataType tokensDt = new HostColumnVector.ListType(false, elementDt);
-    HostColumnVector.DataType returnDt = new HostColumnVector.StructType(true, bufferDt, tokensDt);
     try (ColumnVector jsonCv = ColumnVector.fromStrings(
             "{'test':'value'}{'k': \"v\", \"A\": [1, 2, 3, 4]}",
             "{'key': \"val\\bue\" , \"ARRAY\" : [ 1.0 , 2.0, 3 , 44.01 ]}",
             "{'ERROR':",
             "{}",
-            "[100, 200, 300]");
-         ColumnVector expected = ColumnVector.fromStructs(returnDt,
-                 // TODO actually finish this...
-                 new HostColumnVector.StructData("{\"k\":\"v\",\"A\":[1,2,3,4]}",
-                         Arrays.asList(new HostColumnVector.StructData((byte)0, 0))));
-         ColumnVector actual = JSONUtils.tokenizeJson(jsonCv)) {
-      assertColumnsAreEqual(expected, actual);
+            "[100, 200, 300]")) {
+      JSONUtils.tokenizeJson(jsonCv);
     }
   }
-*/
 
   /**
    * Test: query is $.k

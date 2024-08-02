@@ -71,21 +71,13 @@ public class JSONUtils {
     return new ColumnVector(getJsonObject(input.getNativeView(), typeNums, names, indexes));
   }
 
-  public static ColumnVector differentGetJsonObject(ColumnVector input, PathInstructionJni[] path_instructions) {
+  /**
+   * This is just intended to do tokenization for timing purposes. Nothing is returned
+   */
+  public static void tokenizeJson(ColumnVector input) {
     assert(input.getType().equals(DType.STRING)) : "column must be a String";
-    return new ColumnVector(differentGetJsonObject(input.getNativeView(), path_instructions));
+    tokenizeJson(input.getNativeView());
   }
-
-  // TODO might want to have some options to tokenize this differently. We also need to talk about how to deal
-  //  with single quotes after tokenization. Might need to point to things in a better way???
-  public static ColumnVector tokenizeJson(ColumnVector input) {
-    assert(input.getType().equals(DType.STRING)) : "column must be a String";
-    return new ColumnVector(tokenizeJson(input.getNativeView()));
-  }
-
-  private static native long getJsonObject(long input, PathInstructionJni[] path_instructions);
-  private static native long differentGetJsonObject(long input, PathInstructionJni[] path_instructions);
-  private static native long tokenizeJson(long input);
 
   public static ColumnVector[] getJsonObjectMultiplePaths(ColumnVector input,
                                                           List<List<PathInstructionJni>> paths) {
@@ -131,4 +123,6 @@ public class JSONUtils {
                                                           String[] names,
                                                           int[] indexes,
                                                           int[] pathOffsets);
+
+  private static native void tokenizeJson(long input);
 }
