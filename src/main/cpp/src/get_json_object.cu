@@ -35,6 +35,7 @@
 #include <cudf/utilities/span.hpp>
 
 #include <rmm/device_uvector.hpp>
+#include <rmm/exec_policy.hpp>
 
 #include <thrust/pair.h>
 #include <thrust/tuple.h>
@@ -42,6 +43,12 @@
 namespace spark_rapids_jni {
 
 namespace detail {
+
+// path max depth limitation
+// There is a same constant in JSONUtil.java, keep them consistent when changing
+// Note: Spark-Rapids should guarantee the path depth is less or equal to this limit,
+// or GPU reports cudaErrorIllegalAddress
+constexpr int max_path_depth = 16;
 
 /**
  * write JSON style
@@ -269,8 +276,6 @@ class json_generator {
     }
   }
 
-  __device__ void reset() { output_len = 0; }
-
   __device__ inline size_t get_output_len() const { return output_len; }
   __device__ inline char* get_output_start_position() const { return output; }
   __device__ inline char* get_current_output_position() const { return output + output_len; }
@@ -371,7 +376,6 @@ __device__ bool evaluate_path(json_parser& p,
     write_style style;
 
     cudf::device_span<path_instruction const> path;
-
     // is this context task is done
     bool task_is_done;
 
@@ -385,12 +389,6 @@ __device__ bool evaluate_path(json_parser& p,
     // used to save child JSON generator for case path 8
     json_generator child_g;
   };
-
-  // path max depth limitation
-  // There is a same constant in JSONUtil.java, keep them consistent when changing
-  // Note: Spark-Rapids should guarantee the path depth is less or equal to this limit,
-  // or GPU reports cudaErrorIllegalAddress
-  constexpr int max_path_depth = 8;
 
   // define stack; plus 1 indicates root context task needs an extra memory
   context stack[max_path_depth + 1];
@@ -793,7 +791,7 @@ rmm::device_uvector<path_instruction> construct_path_commands(
   std::vector<std::tuple<path_instruction_type, std::string, int64_t>> const& instructions,
   cudf::string_scalar const& all_names_scalar,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   int name_pos = 0;
 
@@ -802,10 +800,6 @@ rmm::device_uvector<path_instruction> construct_path_commands(
   for (auto const& inst : instructions) {
     auto const& [type, name, index] = inst;
     switch (type) {
-      case path_instruction_type::SUBSCRIPT:
-      case path_instruction_type::KEY:
-        // skip SUBSCRIPT and KEY to save stack size in `evaluate_path`
-        break;
       case path_instruction_type::WILDCARD:
         path_commands.emplace_back(path_instruction{path_instruction_type::WILDCARD});
         break;
@@ -840,13 +834,12 @@ rmm::device_uvector<path_instruction> construct_path_commands(
  * @returns A pair containing the result code and the output buffer.
  */
 __device__ thrust::pair<bool, size_t> get_json_object_single(
-  char const* input,
-  cudf::size_type input_len,
+  char_range input,
   cudf::device_span<path_instruction const> path_commands,
   char* out_buf,
   size_t out_buf_size)
 {
-  json_parser j_parser(input, input_len);
+  json_parser j_parser(input);
   j_parser.next_token();
   // JSON validation check
   if (json_token::ERROR == j_parser.get_current_token()) { return {false, 0}; }
@@ -878,16 +871,24 @@ __device__ thrust::pair<bool, size_t> get_json_object_single(
  * (chars and validity).
  *
  * @param col Device view of the incoming string
- * @param commands JSONPath command buffer
+ * @param path_commands JSONPath command buffer
+ * @param d_sizes a buffer used to write the output sizes in the first pass,
+ *        and is read back in on the second pass to compute offsets.
  * @param output_offsets Buffer used to store the string offsets for the results
  *        of the query
  * @param out_buf Buffer used to store the results of the query
  * @param out_validity Output validity buffer
  * @param out_valid_count Output count of # of valid bits
- * @param options Options controlling behavior
  */
 template <int block_size>
-__launch_bounds__(block_size) CUDF_KERNEL
+// We have 1 for the minBlocksPerMultiprocessor in the launch bounds to avoid spilling from
+// the kernel itself. By default NVCC uses a heuristic to find a balance between the
+// maximum number of registers used by a kernel and the parallelism of the kernel.
+// If lots of registers are used the parallelism may suffer. But in our case
+// NVCC gets this wrong and we want to avoid spilling all the time or else
+// the performance is really bad. This essentially tells NVCC to prefer using lots
+// of registers over spilling.
+__launch_bounds__(block_size, 1) CUDF_KERNEL
   void get_json_object_kernel(cudf::column_device_view col,
                               cudf::device_span<path_instruction const> path_commands,
                               cudf::size_type* d_sizes,
@@ -911,8 +912,8 @@ __launch_bounds__(block_size) CUDF_KERNEL
         out_buf != nullptr ? output_offsets[tid + 1] - output_offsets[tid] : 0;
 
       // process one single row
-      auto [result, output_size] = get_json_object_single(
-        str.data(), str.size_bytes(), {path_commands.data(), path_commands.size()}, dst, dst_size);
+      auto [result, output_size] =
+        get_json_object_single(str, {path_commands.data(), path_commands.size()}, dst, dst_size);
       if (result) { is_valid = true; }
 
       // filled in only during the precompute step. during the compute step, the
@@ -950,9 +951,11 @@ std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
   std::vector<std::tuple<path_instruction_type, std::string, int64_t>> const& instructions,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   if (input.is_empty()) return cudf::make_empty_column(cudf::type_id::STRING);
+
+  if (instructions.size() > max_path_depth) { CUDF_FAIL("JSONPath query exceeds maximum depth"); }
 
   // get a string buffer to store all the names and convert to device
   std::string all_names;
@@ -1016,7 +1019,7 @@ std::unique_ptr<cudf::column> get_json_object(
   cudf::strings_column_view const& input,
   std::vector<std::tuple<path_instruction_type, std::string, int64_t>> const& instructions,
   rmm::cuda_stream_view stream,
-  rmm::mr::device_memory_resource* mr)
+  rmm::device_async_resource_ref mr)
 {
   return detail::get_json_object(input, instructions, stream, mr);
 }
