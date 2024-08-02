@@ -13,29 +13,14 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "36f379f29660761fe033a1306ca9dab6a88cb65c",
+      "git_tag" : "e21d607157218540cd7c45461213fb96adf720b7",
       "git_url" : "https://github.com/NVIDIA/cccl.git",
       "patches" : 
       [
         {
-          "file" : "cccl/bug_fixes.diff",
-          "fixed_in" : "2.3",
-          "issue" : "CCCL installs header-search.cmake files in nondeterministic order and has a typo in checking target creation that leads to duplicates"
-        },
-        {
-          "file" : "cccl/hide_kernels.diff",
-          "fixed_in" : "2.3",
-          "issue" : "Mark all cub and thrust kernels with hidden visibility [https://github.com/nvidia/cccl/pulls/443]"
-        },
-        {
-          "file" : "cccl/revert_pr_211.diff",
-          "fixed_in" : "",
-          "issue" : "thrust::copy introduced a change in behavior that causes failures with cudaErrorInvalidValue."
-        },
-        {
-          "file" : "cccl/kernel_pointer_hiding.diff",
-          "fixed_in" : "2.4",
-          "issue" : "Hide APIs that accept kernel pointers [https://github.com/NVIDIA/cccl/pull/1395]"
+          "file" : "${current_json_dir}/cccl_symbol_visibility.diff",
+          "fixed_in" : "2.6",
+          "issue" : "Correct symbol visibility issues in libcudacxx [https://github.com/NVIDIA/cccl/pull/1832/]"
         },
         {
           "file" : "${current_json_dir}/thrust_disable_64bit_dispatching.diff",
@@ -53,7 +38,7 @@
           "issue" : "Improve Thrust scan compile times by reducing the number of kernels generated [https://github.com/rapidsai/cudf/pull/8183]"
         }
       ],
-      "version" : "2.2.0"
+      "version" : "2.5.0"
     },
     "GTest" : 
     {
@@ -67,23 +52,23 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "261445be7993df57f624a3f4ee9fd15e7d26bb5e",
+      "git_tag" : "eb2fe7e477e0725f41829b2a73a1082a8a54bf29",
       "git_url" : "https://github.com/rapidsai/kvikio.git",
-      "version" : "24.06"
+      "version" : "24.10"
     },
-    "NVTX3" : 
+    "bs_thread_pool" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "e170594ac7cf1dac584da473d4ca9301087090c1",
-      "git_url" : "https://github.com/NVIDIA/NVTX.git",
-      "version" : "3.1.0"
+      "git_tag" : "097aa718f25d44315cadb80b407144ad455ee4f9",
+      "git_url" : "https://github.com/bshoshany/thread-pool.git",
+      "version" : "4.1.0"
     },
     "cuco" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "2101cb31d0210b609cd02c88f9b538e10881d91d",
+      "git_tag" : "ee5c10456c7ad584c254152411ba3dc114537a6f",
       "git_url" : "https://github.com/NVIDIA/cuCollections.git",
       "version" : "0.0.1"
     },
@@ -131,9 +116,9 @@
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "11e73a8c85b45e3d49c8c541b4e1497a649fe03c",
+      "git_tag" : "1e2664a70ec14907409cadcceb14d79b9670bcdb",
       "git_url" : "https://github.com/apache/arrow-nanoarrow.git",
-      "version" : "0.5.0"
+      "version" : "0.6.0.dev"
     },
     "nvcomp" : 
     {
@@ -143,18 +128,31 @@
       "git_url" : "https://github.com/NVIDIA/nvcomp.git",
       "proprietary_binary" : 
       {
-        "aarch64-linux" : "https://developer.download.nvidia.com/compute/nvcomp/${version}/local_installers/nvcomp_${version}_SBSA_${cuda-toolkit-version-major}.x.tgz",
-        "x86_64-linux" : "https://developer.download.nvidia.com/compute/nvcomp/${version}/local_installers/nvcomp_${version}_x86_64_${cuda-toolkit-version-major}.x.tgz"
+        "aarch64-linux" : "https://developer.download.nvidia.com/compute/nvcomp/${version}/local_installers/nvcomp_${version}_SBSA_${cuda-toolkit-version-mapping}.tgz",
+        "x86_64-linux" : "https://developer.download.nvidia.com/compute/nvcomp/${version}/local_installers/nvcomp_${version}_x86_64_${cuda-toolkit-version-mapping}.tgz"
+      },
+      "proprietary_binary_cuda_version_mapping" : 
+      {
+        "11" : "11.x",
+        "12" : "12.x"
       },
       "version" : "3.0.6"
+    },
+    "nvtx3" : 
+    {
+      "always_download" : true,
+      "git_shallow" : false,
+      "git_tag" : "e170594ac7cf1dac584da473d4ca9301087090c1",
+      "git_url" : "https://github.com/NVIDIA/NVTX.git",
+      "version" : "3.1.0"
     },
     "rmm" : 
     {
       "always_download" : true,
       "git_shallow" : false,
-      "git_tag" : "46e153c18d17b07526d6ff2e04859fcbbd706879",
+      "git_tag" : "514ba80fc9810f9ca38ffac350dc69414f4e05f6",
       "git_url" : "https://github.com/rapidsai/rmm.git",
-      "version" : "24.06"
+      "version" : "24.10"
     },
     "spdlog" : 
     {

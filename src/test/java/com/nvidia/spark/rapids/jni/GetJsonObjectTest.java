@@ -23,6 +23,10 @@ import ai.rapids.cudf.HostColumnVector;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.List;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -88,9 +92,9 @@ public class GetJsonObjectTest {
         namedPath("k") };
     try (ColumnVector jsonCv = ColumnVector.fromStrings(
         "{\"k\": \"v\"}");
-        ColumnVector expected = ColumnVector.fromStrings(
-            "v");
-        ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
+         ColumnVector expected = ColumnVector.fromStrings(
+             "v");
+         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
       assertColumnsAreEqual(expected, actual);
     }
   }
@@ -226,7 +230,7 @@ public class GetJsonObjectTest {
     String JSON4 = "['a','b','\"C\"']";
     // \\u4e2d\\u56FD is 中国
     String JSON5 = "'\\u4e2d\\u56FD\\\"\\'\\\\\\/\\b\\f\\n\\r\\t\\b'";
-    String JSON6 = "['\\u4e2d\\u56FD\\\"\\'\\\\\\/\\b\\f\\n\\r\\t\\b']"; 
+    String JSON6 = "['\\u4e2d\\u56FD\\\"\\'\\\\\\/\\b\\f\\n\\r\\t\\b']";
 
     String expectedStr1 = "{\"a\":\"A\"}";
     String expectedStr2 = "{\"a\":\"A\\\"\"}";
@@ -499,13 +503,14 @@ public class GetJsonObjectTest {
     };
 
     String JSON1 = "[ {'k': [0, 1, 2]}, {'k': [10, 11, 12]}, {'k': [20, 21, 22]}  ]";
+    String JSON2 = "[ {'k': [0, 1, 2]}, {'k': {'a': 'b'}}, {'k': [10, 11, 12]}, {'k': 'abc'}  ]";
     String expectedStr1 = "[[0,1,2],[10,11,12],[20,21,22]]";
+    String expectedStr2 = "[[0,1,2],[10,11,12]]";
 
     try (
-        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1);
-        ColumnVector expected = ColumnVector.fromStrings(expectedStr1);
+        ColumnVector jsonCv = ColumnVector.fromStrings(JSON1, JSON2);
+        ColumnVector expected = ColumnVector.fromStrings(expectedStr1, expectedStr2);
         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
-
       assertColumnsAreEqual(expected, actual);
     }
   }
@@ -654,6 +659,136 @@ public class GetJsonObjectTest {
         ColumnVector expected = ColumnVector.fromStrings("v1", null);
         ColumnVector actual = JSONUtils.getJsonObject(jsonCv, query)) {
       assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  /**
+   * This test is when the JNI kernel is called twice. It happens when the output JSON strings
+   * have lengths that are larger than their corresponding input.
+   */
+  @Test
+  void getJsonObjectTest_JNIKernelCalledTwice() {
+    // This is equivalent to the path '$'.
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {};
+    try (
+        ColumnVector input = ColumnVector.fromStrings("['\n']", "['\n\n\n\n\n\n\n\n\n\n']",
+            "", "", "", "", "", "", "", "");
+        ColumnVector expected = ColumnVector.fromStrings("[\"\\n\"]",
+            "[\"\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\"]", null, null, null, null, null, null, null, null);
+        ColumnVector actual = JSONUtils.getJsonObject(input, query)) {
+      assertColumnsAreEqual(expected, actual);
+    }
+  }
+
+  @Test
+  void getJsonObjectMultiplePathsTest() {
+    List<JSONUtils.PathInstructionJni> path0 = Arrays.asList(namedPath("k0"));
+    List<JSONUtils.PathInstructionJni> path1 = Arrays.asList(namedPath("k1"));
+    List<List<JSONUtils.PathInstructionJni>> paths = Arrays.asList(path0, path1);
+    try (ColumnVector jsonCv = ColumnVector.fromStrings("{\"k0\": \"v0\", \"k1\": \"v1\"}");
+         ColumnVector expected0 = ColumnVector.fromStrings("v0");
+         ColumnVector expected1 = ColumnVector.fromStrings("v1")) {
+      ColumnVector[] output = JSONUtils.getJsonObjectMultiplePaths(jsonCv, paths);
+      try {
+        assertColumnsAreEqual(expected0, output[0]);
+        assertColumnsAreEqual(expected1, output[1]);
+      } finally {
+        for (ColumnVector cv : output) {
+          cv.close();
+        }
+      }
+    }
+  }
+
+  @Test
+  void getJsonObjectMultiplePathsTest_JNIKernelCalledTwice() {
+    List<JSONUtils.PathInstructionJni> path0 = Arrays.asList(namedPath("k0"));
+    List<JSONUtils.PathInstructionJni> path1 = Arrays.asList(namedPath("k1"));
+    List<JSONUtils.PathInstructionJni> path2 = Arrays.asList();
+    List<List<JSONUtils.PathInstructionJni>> paths = Arrays.asList(path0, path1, path2);
+    try (ColumnVector jsonCv = ColumnVector.fromStrings("{\"k0\": \"v0\", \"k1\": \"v1\"}", "['\n\n\n\n\n\n\n\n\n\n']");
+         ColumnVector expected0 = ColumnVector.fromStrings("v0", null);
+         ColumnVector expected1 = ColumnVector.fromStrings("v1", null);
+         ColumnVector expected2 = ColumnVector.fromStrings("{\"k0\":\"v0\",\"k1\":\"v1\"}", "[\"\\n\\n\\n\\n\\n\\n\\n\\n\\n\\n\"]")) {
+      ColumnVector[] output = JSONUtils.getJsonObjectMultiplePaths(jsonCv, paths);
+      try {
+        assertColumnsAreEqual(expected0, output[0]);
+        assertColumnsAreEqual(expected1, output[1]);
+        assertColumnsAreEqual(expected2, output[2]);
+      } finally {
+        for (ColumnVector cv : output) {
+          cv.close();
+        }
+      }
+    }
+  }
+
+  /**
+   * This test is when an exception is thrown due to the input JSON path being too long.
+   */
+  @Test
+  void getJsonObjectTest_ExceedMaxNestingDepthInPath() {
+    JSONUtils.PathInstructionJni[] query =
+        new JSONUtils.PathInstructionJni[JSONUtils.MAX_PATH_DEPTH + 1];
+    for (int i = 0; i < JSONUtils.MAX_PATH_DEPTH + 1; ++i) {
+      query[i] = namedPath("k");
+    }
+    try (ColumnVector input = ColumnVector.fromStrings("")) {
+      assertThrows(CudfException.class, () -> JSONUtils.getJsonObject(input, query));
+    }
+  }
+
+  /**
+   * This test is when an exception is thrown due to maximum nesting depth being exceeded
+   * when pushing the context stack during evaluating the JSON path.
+   *
+   * The maximum depth limit here is the same as the limit for the input JSON path.
+   */
+  @Test
+  void getJsonObjectTest_ExceedMaxNestingDepthInContextStack() {
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {
+        wildcardPath(), wildcardPath()
+    };
+    String jsonStr = "\"v\"";
+    for (int i = 0; i < JSONUtils.MAX_PATH_DEPTH; ++i) {
+      jsonStr = String.format("[%s]", jsonStr);
+    }
+    // This string has nesting level exceeding the maximum depth.
+    String jsonStrTooDeep = String.format("[%s]", jsonStr);
+
+    try (ColumnVector validInput = ColumnVector.fromStrings(jsonStr);
+         ColumnVector invalidInput = ColumnVector.fromStrings(jsonStrTooDeep);
+         ColumnVector expected = ColumnVector.fromStrings("[\"v\"]");
+         ColumnVector output = JSONUtils.getJsonObject(validInput, query)) {
+      assertColumnsAreEqual(expected, output);
+      assertThrows(CudfException.class, () -> JSONUtils.getJsonObject(invalidInput, query));
+    }
+  }
+
+  /**
+   * This test is when an exception is thrown due to maximum nesting depth being exceeded
+   * in the JSON parser. The JSON path is simply mirroring the input.
+   *
+   * Note that the maximum depth in the internal parser, which is being tested here, is different
+   * from the limit for the input JSON path.
+   */
+  @Test
+  void getJsonObjectTest_ExceedMaxNestingDepthInJSONParser() {
+    // This is equivalent to the path '$'.
+    JSONUtils.PathInstructionJni[] query = new JSONUtils.PathInstructionJni[] {};
+
+    final int MAX_PARSER_DEPTH = 64;
+    String jsonStr = "\"v\"";
+    for (int i = 0; i < MAX_PARSER_DEPTH; ++i) { // The maximum depth in JSON parser is 64.
+      jsonStr = String.format("{\"k%d\":%s}", i, jsonStr);
+    }
+    // This string has nesting level exceeding the maximum depth of 64.
+    String jsonStrTooDeep = String.format("{\"k%d\":%s}", MAX_PARSER_DEPTH, jsonStr);
+    try (ColumnVector validInput = ColumnVector.fromStrings(jsonStr);
+         ColumnVector invalidInput = ColumnVector.fromStrings(jsonStrTooDeep);
+         ColumnVector output = JSONUtils.getJsonObject(validInput, query)) {
+      assertColumnsAreEqual(validInput, output);
+      assertThrows(CudfException.class, () -> JSONUtils.getJsonObject(invalidInput, query));
     }
   }
 
