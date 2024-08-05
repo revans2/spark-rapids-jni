@@ -156,10 +156,9 @@ public class JSONUtils {
                                                           byte[] typeNums,
                                                           String[] names,
                                                           int[] indexes,
-                                                          int[] pathOffsets);
-
-  private static native void tokenizeJson(long input);
                                                           int[] pathOffsets,
                                                           long memoryBudgetBytes,
                                                           int parallelOverride);
+
+  private static native void tokenizeJson(long input);
 }

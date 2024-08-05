@@ -1211,6 +1211,11 @@ std::vector<std::unique_ptr<cudf::column>> get_json_object(
       long budget = 0;
       while (at < num_outputs && budget < memory_budget_bytes) {
         auto output_location = sorted_indices[at];
+        std::cerr << "ADDING ";
+        for (size_t j = 0; j < json_paths[output_location].size(); j++) {
+          std::cerr << std::get<1>(json_paths[output_location][j]) << " " << std::get<2>(json_paths[output_location][j]) << ", ";
+        }
+        std::cerr << std::endl;
         batch.emplace_back(json_paths[output_location]);
         output_ids.push_back(output_location);
         at++;
