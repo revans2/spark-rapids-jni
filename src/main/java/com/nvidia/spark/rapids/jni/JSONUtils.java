@@ -189,6 +189,7 @@ public class JSONUtils {
                                                boolean isUSLocale) {
     assert (input.getType().equals(DType.STRING)) : "Input must be of STRING type";
     return new ColumnVector(fromJSONToStructs(input.getNativeView(),
+        schema.getType() == DType.LIST,
         schema.getFlattenedColumnNames(),
         schema.getFlattenedNumChildren(),
         schema.getFlattenedTypeIds(),
@@ -217,6 +218,7 @@ public class JSONUtils {
                                                 boolean isUSLocale) {
     assert (input.getType().equals(DType.STRING)) : "Input must be of STRING type";
     return new ColumnVector(convertFromStrings(input.getNativeView(),
+        schema.getType() == DType.LIST,
         schema.getFlattenedNumChildren(),
         schema.getFlattenedTypeIds(),
         schema.getFlattenedTypeScales(),
@@ -262,6 +264,7 @@ public class JSONUtils {
                                                          boolean unquotedControlChars);
 
   private static native long fromJSONToStructs(long input,
+                                               boolean isTopLevelList,
                                                String[] names,
                                                int[] numChildren,
                                                int[] typeIds,
@@ -274,6 +277,7 @@ public class JSONUtils {
                                                boolean isUSLocale);
 
   private static native long convertFromStrings(long input,
+                                                boolean isTopLevelList,
                                                 int[] numChildren,
                                                 int[] typeIds,
                                                 int[] typeScales,

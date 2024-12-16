@@ -113,7 +113,8 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> parse_schema_
 // - The second schema contains decimal precision (if available) and preserves schema column types
 //   as well as the column order, used for converting from STRING type to the desired types for the
 //   final output.
-std::pair<cudf::io::schema_element, schema_element_with_precision> generate_struct_schema(
+std::pair<cudf::io::schema_element, schema_element_with_precision> generate_schema(
+  bool is_top_list,
   std::vector<std::string> const& col_names,
   std::vector<int> const& num_children,
   std::vector<int> const& types,
@@ -133,11 +134,20 @@ std::pair<cudf::io::schema_element, schema_element_with_precision> generate_stru
     schema_cols_with_precisions.emplace_back(name, std::move(child_with_precision));
     name_order.push_back(name);
   }
-  return {
-    cudf::io::schema_element{
-      cudf::data_type{cudf::type_id::STRUCT}, std::move(schema_cols), {std::move(name_order)}},
-    schema_element_with_precision{
-      cudf::data_type{cudf::type_id::STRUCT}, -1, std::move(schema_cols_with_precisions)}};
+  if (is_top_list) {
+    // TODO verify that schema_cols is only 1 element.
+    return {
+      cudf::io::schema_element{
+        cudf::data_type{cudf::type_id::LIST}, std::move(schema_cols), {std::move(name_order)}},
+      schema_element_with_precision{
+        cudf::data_type{cudf::type_id::LIST}, -1, std::move(schema_cols_with_precisions)}};
+  } else {
+    return {
+      cudf::io::schema_element{
+        cudf::data_type{cudf::type_id::STRUCT}, std::move(schema_cols), {std::move(name_order)}},
+      schema_element_with_precision{
+        cudf::data_type{cudf::type_id::STRUCT}, -1, std::move(schema_cols_with_precisions)}};
+  }
 }
 
 using string_index_pair = thrust::pair<char const*, cudf::size_type>;
@@ -796,7 +806,30 @@ std::unique_ptr<cudf::column> convert_data_type(InputType&& input,
   return nullptr;
 }
 
+void debug_schema(std::string const & name, cudf::io::schema_element const & elem, int depth = 0) {
+  for (int i = 0; i < depth; i++) {
+    std::cerr << "\t";
+  }
+  std::cerr << "JNI-" << name << " " <<
+    (elem.type.id() == cudf::type_id::LIST ? "LIST" :
+    (elem.type.id() == cudf::type_id::STRUCT ? "STRUCT" : "STRING")) << std::endl;
+
+  if (elem.column_order) {
+    for (auto it = elem.column_order->begin(); it != elem.column_order->end(); it++) {
+      for (int i = 0; i < depth + 1; i++) {
+        std::cerr << "*\t";
+      }
+      std::cerr << *it << std::endl;
+    }
+  }
+
+  for (auto it = elem.child_types.begin(); it != elem.child_types.end(); it++) {
+    debug_schema(it->first, it->second, depth + 1);
+  }
+}
+
 std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view const& input,
+                                                   bool is_top_list,
                                                    std::vector<std::string> const& col_names,
                                                    std::vector<int> const& num_children,
                                                    std::vector<int> const& types,
@@ -813,7 +846,13 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
   auto const [concat_input, delimiter, should_be_nullified] =
     concat_json(input, false, stream, cudf::get_current_device_resource());
   auto const [schema, schema_with_precision] =
-    generate_struct_schema(col_names, num_children, types, scales, precisions);
+    generate_schema(is_top_list, col_names, num_children, types, scales, precisions);
+
+  debug_schema("TOP", schema);
+
+  std::cerr << "DELIM " << (int)delimiter << std::endl;
+  std::cerr << "PRUNE " << (schema.child_types.size() != 0) << std::endl;
+  std::cerr << "SIZE " << concat_input->size() << std::endl;
 
   auto opts_builder =
     cudf::io::json_reader_options::builder(
@@ -823,7 +862,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
       .lines(true)
       .recovery_mode(cudf::io::json_recovery_mode_t::RECOVER_WITH_NULL)
       .normalize_whitespace(true)
-      .mixed_types_as_string(true)
+      //.mixed_types_as_string(true)
       .keep_quotes(true)
       .experimental(true)
       .strict_validation(true)
@@ -836,13 +875,34 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
       .dtypes(schema)
       .prune_columns(schema.child_types.size() != 0);
 
+  std::cerr << "GOING TO CALL READ_JSON" << std::endl;
   auto const parsed_table_with_meta = cudf::io::read_json(opts_builder.build());
+  std::cerr << "DONE WITH READ_JSON" << std::endl;
+
   auto const& parsed_meta           = parsed_table_with_meta.metadata;
   auto parsed_columns               = parsed_table_with_meta.tbl->release();
 
-  CUDF_EXPECTS(parsed_columns.size() == schema.child_types.size(),
-               "Numbers of output columns is different from schema size.");
+  if (is_top_list) {
+    CUDF_EXPECTS(parsed_columns.size() == 1,
+                 "Numbers of output columns is not 1 for a top level list.");
+  } else {
+    CUDF_EXPECTS(parsed_columns.size() == schema.child_types.size(),
+                 "Numbers of output columns is different from schema size.");
+  }
 
+  if (is_top_list) {
+    auto const d_type_top = parsed_columns[0]->type().id();
+    CUDF_EXPECTS(d_type_top == cudf::type_id::LIST ,
+                "Parsed JSON column should be a LIST");
+
+    // TODO need to figure out how to use should_be_nullified
+    return convert_data_type(std::move(parsed_columns[0]),
+                                                  schema_with_precision,
+                                                  allow_nonnumeric_numbers,
+                                                  is_us_locale,
+                                                  stream,
+                                                  mr);
+  }
   std::vector<std::unique_ptr<cudf::column>> converted_cols;
   converted_cols.reserve(parsed_columns.size());
   for (std::size_t i = 0; i < parsed_columns.size(); ++i) {
@@ -881,6 +941,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
 }  // namespace detail
 
 std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view const& input,
+                                                   bool is_top_list,
                                                    std::vector<std::string> const& col_names,
                                                    std::vector<int> const& num_children,
                                                    std::vector<int> const& types,
@@ -897,6 +958,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
   CUDF_FUNC_RANGE();
 
   return detail::from_json_to_structs(input,
+                                      is_top_list,
                                       col_names,
                                       num_children,
                                       types,
@@ -911,7 +973,9 @@ std::unique_ptr<cudf::column> from_json_to_structs(cudf::strings_column_view con
                                       mr);
 }
 
+
 std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view const& input,
+                                                   bool is_top_list,
                                                    std::vector<int> const& num_children,
                                                    std::vector<int> const& types,
                                                    std::vector<int> const& scales,
@@ -923,7 +987,8 @@ std::unique_ptr<cudf::column> convert_from_strings(cudf::strings_column_view con
 {
   CUDF_FUNC_RANGE();
 
-  [[maybe_unused]] auto const [schema, schema_with_precision] = detail::generate_struct_schema(
+  [[maybe_unused]] auto const [schema, schema_with_precision] = detail::generate_schema(
+    is_top_list,
     /*dummy col_names*/ std::vector<std::string>(num_children.size(), std::string{}),
     num_children,
     types,

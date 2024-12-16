@@ -46,6 +46,7 @@ std::unique_ptr<cudf::column> from_json_to_raw_map(
  */
 std::unique_ptr<cudf::column> from_json_to_structs(
   cudf::strings_column_view const& input,
+  bool is_top_list,
   std::vector<std::string> const& col_names,
   std::vector<int> const& num_children,
   std::vector<int> const& types,
@@ -66,6 +67,7 @@ std::unique_ptr<cudf::column> from_json_to_structs(
  */
 std::unique_ptr<cudf::column> convert_from_strings(
   cudf::strings_column_view const& input,
+  bool is_top_list,
   std::vector<int> const& num_children,
   std::vector<int> const& types,
   std::vector<int> const& scales,

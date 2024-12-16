@@ -170,6 +170,7 @@ JNIEXPORT jlong JNICALL
 Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
                                                              jclass,
                                                              jlong j_input,
+                                                             jboolean is_top_list,
                                                              jobjectArray j_col_names,
                                                              jintArray j_num_children,
                                                              jintArray j_types,
@@ -206,6 +207,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_fromJSONToStructs(JNIEnv* env,
 
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::from_json_to_structs(cudf::strings_column_view{*input_cv},
+                                             is_top_list,
                                              col_names,
                                              num_children,
                                              types,
@@ -225,6 +227,7 @@ JNIEXPORT jlong JNICALL
 Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
                                                               jclass,
                                                               jlong j_input,
+                                                              jboolean is_top_list,
                                                               jintArray j_num_children,
                                                               jintArray j_types,
                                                               jintArray j_scales,
@@ -254,6 +257,7 @@ Java_com_nvidia_spark_rapids_jni_JSONUtils_convertFromStrings(JNIEnv* env,
 
     return cudf::jni::ptr_as_jlong(
       spark_rapids_jni::convert_from_strings(cudf::strings_column_view{*input_cv},
+                                             is_top_list,
                                              num_children,
                                              types,
                                              scales,

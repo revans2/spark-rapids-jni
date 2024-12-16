@@ -16,24 +16,88 @@
 
 package com.nvidia.spark.rapids.jni;
 
-import ai.rapids.cudf.ColumnVector;
-import ai.rapids.cudf.BinaryOp;
+import ai.rapids.cudf.*;
 
-import ai.rapids.cudf.JSONOptions;
 import org.junit.jupiter.api.Test;
+
+import java.io.UnsupportedEncodingException;
+import java.util.Arrays;
 
 import static ai.rapids.cudf.AssertUtils.assertColumnsAreEqual;
 
-public class FromJsonToRawMapTest {
+public class FromJsonTest {
   private static JSONOptions getOptions() {
     return JSONOptions.builder()
+        .withRecoverWithNull(true)
+        .withNormalizeWhitespace(true)
+        .withKeepQuotes(true)
+        .withExperimental(true)
+        .withStrictValidation(true)
+        // other params that can be changed by JNI read command
         .withNormalizeSingleQuotes(true)
         .withLeadingZeros(true)
         .withNonNumericNumbers(true)
         .withUnquotedControlChars(true)
+        .withLineDelimiter('\0')
         .build();
   }
 
+  @Test
+  void testJsonStruct() {
+    String jsonString1 = "{\"A\" : 100 }";
+    String jsonString2 = "{}";
+    String jsonString3 = "{\"A\": \"200\"}";
+
+    Schema schema = Schema.builder().column(DType.STRING, "A").build();
+
+    try (ColumnVector input =
+             ColumnVector.fromStrings(jsonString1, jsonString2, jsonString3);
+         ColumnVector output = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expectedStrings = ColumnVector.fromStrings("100", null, "200");
+         ColumnVector expected = ColumnVector.makeStruct(expectedStrings)
+    ) {
+      assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  @Test
+  void testJsonArray() {
+    String jsonString1 = "[100]";
+    String jsonString2 = "[]";
+    String jsonString3 = "[\"200\", \"300\"]";
+
+    Schema schema = Schema.listBuilder().column(DType.STRING, "element").build();
+
+    try (ColumnVector input =
+             ColumnVector.fromStrings(jsonString1, jsonString2, jsonString3);
+         ColumnVector output = JSONUtils.fromJSONToStructs(input, schema, getOptions(), true);
+         ColumnVector expected = ColumnVector.fromLists(new HostColumnVector.ListType(true ,
+                 new HostColumnVector.BasicType(true, DType.STRING)),
+             Arrays.asList("100"),
+             Arrays.asList(),
+             Arrays.asList("200", "300"));
+    ) {
+      assertColumnsAreEqual(expected, output);
+    }
+  }
+
+  @Test
+  void testJsonArray2() throws UnsupportedEncodingException {
+    byte[] jsonData = "[100]\0[]\0[\"200\", \"300\"]".getBytes("UTF-8");
+
+    Schema schema = Schema.listBuilder().column(DType.STRING, "element").build();
+
+    try (Table t = Table.readJSON(schema, getOptions(), jsonData);
+         ColumnVector expected = ColumnVector.fromLists(new HostColumnVector.ListType(true ,
+             new HostColumnVector.BasicType(true, DType.STRING)),
+             Arrays.asList("100"),
+             Arrays.asList(),
+             Arrays.asList("\"200\"", "\"300\""));
+    ) {
+      assert(t.getNumberOfColumns() == 1);
+      assertColumnsAreEqual(expected, t.getColumn(0));
+    }
+  }
 
   @Test
   void testFromJsonSimpleInput() {

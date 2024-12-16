@@ -124,11 +124,11 @@ std::tuple<std::unique_ptr<rmm::device_buffer>, char, std::unique_ptr<cudf::colu
 
       auto const not_eol = i < size;
 
-      // If the current row is not null or empty, it should start with `{`. Otherwise, we need to
+      // If the current row is not null or empty, it should start with `{` or `[`. Otherwise, we need to
+      auto constexpr start_obj_character = '{';
+      auto constexpr start_arr_character = '[';
       // replace it by a null. This is necessary for libcudf's JSON reader to work.
-      // Note that if we want to support ARRAY schema, we need to check for `[` instead.
-      auto constexpr start_character = '{';
-      if (not_eol && ch != start_character) {
+      if (not_eol && ch != start_obj_character && ch != start_arr_character) {
         output[idx] = thrust::make_tuple(false, nullify_invalid_rows);
         return;
       }
