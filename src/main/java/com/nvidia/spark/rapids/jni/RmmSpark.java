@@ -72,7 +72,7 @@ public class RmmSpark {
       }
       RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> eventHandler =
           new RmmEventHandlerResourceAdaptor<>(deviceResource, tracker, handler, false);
-      sra = new SparkResourceAdaptor(eventHandler, logLocation);
+      sra = new SparkResourceAdaptor(eventHandler, logLocation, 0L, 0L);
       boolean success = false;
       try {
         Rmm.setCurrentDeviceResource(sra, deviceResource, false);

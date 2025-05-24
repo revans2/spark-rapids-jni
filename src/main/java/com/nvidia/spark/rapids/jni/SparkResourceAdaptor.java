@@ -59,7 +59,7 @@ public class SparkResourceAdaptor
    * @param wrapped the memory resource to track allocations. This should not be reused.
    */
   public SparkResourceAdaptor(RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> wrapped) {
-    this(wrapped, null);
+    this(wrapped, null, 0L, 0L);
   }
 
   /**
@@ -68,9 +68,11 @@ public class SparkResourceAdaptor
    * @param logLoc the location that logs should go. "stderr" is treated as going to stderr
    *               "stdout" is treated as going to stdout. null will disable logging and
    *               anything else is treated as a file name.
+   * @param totalGpuPoolSize total GPU memory pool size in bytes.
+   * @param totalCpuPoolSize total CPU memory pool size in bytes.
    */
   public SparkResourceAdaptor(RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> wrapped,
-      String logLoc) {
+      String logLoc, long totalGpuPoolSize, long totalCpuPoolSize) {
     super(wrapped);
     Thread watchDog = new Thread(() -> {
       try {
@@ -89,7 +91,7 @@ public class SparkResourceAdaptor
     } else if ("stdout".equalsIgnoreCase(logLoc)) {
       logLoc = "stdout";
     }
-    handle = createNewAdaptor(wrapped.getHandle(), logLoc);
+    handle = createNewAdaptor(wrapped.getHandle(), logLoc, totalGpuPoolSize, totalCpuPoolSize);
     watchDog.setDaemon(true);
     watchDog.start();
   }
@@ -344,7 +346,7 @@ public class SparkResourceAdaptor
    */
   public static native long getCurrentThreadId();
 
-  private native static long createNewAdaptor(long wrappedHandle, String logLoc);
+  private native static long createNewAdaptor(long wrappedHandle, String logLoc, long totalGpuPoolSize, long totalCpuPoolSize);
   private native static void releaseAdaptor(long handle);
   private static native void startDedicatedTaskThread(long handle, long threadId, long taskId);
   private static native void poolThreadWorkingOnTasks(long handle, boolean isForShuffle, long threadId, long[] taskIds);

@@ -446,8 +446,14 @@ class spark_resource_adaptor final : public rmm::mr::device_memory_resource {
   spark_resource_adaptor(JNIEnv* env,
                          rmm::mr::device_memory_resource* mr,
                          std::shared_ptr<spdlog::logger>& logger,
-                         bool const is_log_enabled)
-    : resource{mr}, logger{logger}, is_log_enabled{is_log_enabled}
+                         bool const is_log_enabled,
+                         long total_gpu_pool_size,
+                         long total_cpu_pool_size)
+    : resource{mr},
+      logger{logger},
+      is_log_enabled{is_log_enabled},
+      total_gpu_pool_size_bytes{total_gpu_pool_size},
+      total_cpu_pool_size_bytes{total_cpu_pool_size}
   {
     if (env->GetJavaVM(&jvm) < 0) { throw std::runtime_error("GetJavaVM failed"); }
     logger->flush_on(spdlog::level::info);
@@ -1012,6 +1018,8 @@ class spark_resource_adaptor final : public rmm::mr::device_memory_resource {
   std::map<long, full_thread_state> threads;
   std::map<long, std::set<long>> task_to_threads;
   long gpu_memory_allocated_bytes = 0;
+  long total_gpu_pool_size_bytes = 0;
+  long total_cpu_pool_size_bytes = 0;
 
   // Metrics are a little complicated. Spark reports metrics at a task level
   // but we track and collect them at a thread level. The life time of a thread
@@ -2014,7 +2022,7 @@ Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_getCurrentThreadId(JNIEnv*
 }
 
 JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_createNewAdaptor(
-  JNIEnv* env, jclass, jlong child, jstring log_loc)
+  JNIEnv* env, jclass, jlong child, jstring log_loc, jlong total_gpu_pool_size, jlong total_cpu_pool_size)
 {
   JNI_NULL_CHECK(env, child, "child is null", 0);
   try {
@@ -2038,7 +2046,7 @@ JNIEXPORT jlong JNICALL Java_com_nvidia_spark_rapids_jni_SparkResourceAdaptor_cr
       }
     }
 
-    auto ret = new spark_resource_adaptor(env, wrapped, logger, is_log_enabled);
+    auto ret = new spark_resource_adaptor(env, wrapped, logger, is_log_enabled, total_gpu_pool_size, total_cpu_pool_size);
     return cudf::jni::ptr_as_jlong(ret);
   }
   CATCH_STD(env, 0)
