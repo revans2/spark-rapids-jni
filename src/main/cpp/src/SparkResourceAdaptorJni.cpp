@@ -220,6 +220,17 @@ struct task_metrics {
   // how much memory a task used to complete it's processing.
   long gpu_memory_active_footprint = 0;
   long gpu_memory_max_footprint    = 0;
+  long current_gpu_memory_usage = 0L;
+  long max_gpu_memory_recent_window = 0L;
+  long max_gpu_memory_infinite_assumption = 0L;
+  long gpu_memory_budget = 0L;
+  long gpu_memory_budget_after_stealing = 0L;
+
+  long current_cpu_memory_usage = 0L;
+  long max_cpu_memory_recent_window = 0L;
+  long max_cpu_memory_infinite_assumption = 0L;
+  long cpu_memory_budget = 0L;
+  long cpu_memory_budget_after_stealing = 0L;
 
   void take_from(task_metrics& other)
   {
@@ -243,6 +254,19 @@ struct task_metrics {
     // of both of them.
     this->gpu_memory_max_footprint += other.gpu_memory_max_footprint;
     this->gpu_memory_active_footprint += other.gpu_memory_active_footprint;
+
+    // New fields aggregation:
+    this->current_gpu_memory_usage += other.current_gpu_memory_usage;
+    this->max_gpu_memory_recent_window = std::max(this->max_gpu_memory_recent_window, other.max_gpu_memory_recent_window);
+    this->max_gpu_memory_infinite_assumption += other.max_gpu_memory_infinite_assumption;
+    this->gpu_memory_budget += other.gpu_memory_budget;
+    this->gpu_memory_budget_after_stealing += other.gpu_memory_budget_after_stealing;
+
+    this->current_cpu_memory_usage += other.current_cpu_memory_usage;
+    this->max_cpu_memory_recent_window = std::max(this->max_cpu_memory_recent_window, other.max_cpu_memory_recent_window);
+    this->max_cpu_memory_infinite_assumption += other.max_cpu_memory_infinite_assumption;
+    this->cpu_memory_budget += other.cpu_memory_budget;
+    this->cpu_memory_budget_after_stealing += other.cpu_memory_budget_after_stealing;
   }
 
   void clear()
@@ -255,6 +279,17 @@ struct task_metrics {
     gpu_max_memory_allocated    = 0;
     gpu_memory_max_footprint    = 0;
     gpu_memory_active_footprint = 0;
+    current_gpu_memory_usage = 0L;
+    max_gpu_memory_recent_window = 0L;
+    max_gpu_memory_infinite_assumption = 0L;
+    gpu_memory_budget = 0L;
+    gpu_memory_budget_after_stealing = 0L;
+
+    current_cpu_memory_usage = 0L;
+    max_cpu_memory_recent_window = 0L;
+    max_cpu_memory_infinite_assumption = 0L;
+    cpu_memory_budget = 0L;
+    cpu_memory_budget_after_stealing = 0L;
   }
 };
 
