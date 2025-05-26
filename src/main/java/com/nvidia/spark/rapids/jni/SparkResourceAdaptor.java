@@ -57,9 +57,11 @@ public class SparkResourceAdaptor
   /**
    * Create a new tracking resource adaptor.
    * @param wrapped the memory resource to track allocations. This should not be reused.
+   * @param initialGpuMemoryBudget The initial GPU memory budget.
+   * @param initialCpuMemoryBudget The initial CPU memory budget.
    */
-  public SparkResourceAdaptor(RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> wrapped) {
-    this(wrapped, null);
+  public SparkResourceAdaptor(RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> wrapped, long initialGpuMemoryBudget, long initialCpuMemoryBudget) {
+    this(wrapped, null, initialGpuMemoryBudget, initialCpuMemoryBudget);
   }
 
   /**
@@ -68,9 +70,11 @@ public class SparkResourceAdaptor
    * @param logLoc the location that logs should go. "stderr" is treated as going to stderr
    *               "stdout" is treated as going to stdout. null will disable logging and
    *               anything else is treated as a file name.
+   * @param initialGpuMemoryBudget The initial GPU memory budget.
+   * @param initialCpuMemoryBudget The initial CPU memory budget.
    */
   public SparkResourceAdaptor(RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> wrapped,
-      String logLoc) {
+      String logLoc, long initialGpuMemoryBudget, long initialCpuMemoryBudget) {
     super(wrapped);
     Thread watchDog = new Thread(() -> {
       try {
@@ -89,7 +93,7 @@ public class SparkResourceAdaptor
     } else if ("stdout".equalsIgnoreCase(logLoc)) {
       logLoc = "stdout";
     }
-    handle = createNewAdaptor(wrapped.getHandle(), logLoc);
+    handle = createNewAdaptor(wrapped.getHandle(), logLoc, initialGpuMemoryBudget, initialCpuMemoryBudget);
     watchDog.setDaemon(true);
     watchDog.start();
   }
@@ -339,12 +343,32 @@ public class SparkResourceAdaptor
   }
 
   /**
+   * Initializes the memory budgets for a given task.
+   * @param taskId The ID of the task.
+   * @param numConcurrentGpuTasks The number of tasks that can run concurrently on the GPU.
+   * @param numConcurrentCpuTasks The number of tasks that can run concurrently on the CPU.
+   */
+  public void initializeTaskBudgets(long taskId, int numConcurrentGpuTasks, int numConcurrentCpuTasks) {
+    // Add basic validation for numConcurrentGpuTasks and numConcurrentCpuTasks if desired (e.g., > 0)
+    if (numConcurrentGpuTasks <= 0) {
+      throw new IllegalArgumentException("numConcurrentGpuTasks must be positive");
+    }
+    if (numConcurrentCpuTasks <= 0) {
+      throw new IllegalArgumentException("numConcurrentCpuTasks must be positive");
+    }
+    initializeTaskBudgetsInternal(getHandle(), taskId, numConcurrentGpuTasks, numConcurrentCpuTasks);
+  }
+
+  /**
    * Get the ID of the current thread that can be used with the other SparkResourceAdaptor APIs.
    * Don't use the java thread ID. They are not related.
    */
   public static native long getCurrentThreadId();
 
-  private native static long createNewAdaptor(long wrappedHandle, String logLoc);
+  private native static long createNewAdaptor(long wrappedHandle, String logLoc, long initialGpuMemoryBudget, long initialCpuMemoryBudget);
+  private native void initializeTaskBudgetsInternal(long handle, long taskId, int numConcurrentGpuTasks, int numConcurrentCpuTasks);
+  private native void setStageConfigurationInternal(long handle, long stageId, int numConcurrentGpuTasksInStage, int numConcurrentCpuTasksInStage);
+  private native void taskStartedInternal(long handle, long taskId, long stageId);
   private native static void releaseAdaptor(long handle);
   private static native void startDedicatedTaskThread(long handle, long threadId, long taskId);
   private static native void poolThreadWorkingOnTasks(long handle, boolean isForShuffle, long threadId, long[] taskIds);

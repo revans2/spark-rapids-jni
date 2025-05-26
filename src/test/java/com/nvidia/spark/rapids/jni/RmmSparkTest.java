@@ -1288,6 +1288,50 @@ public class RmmSparkTest {
     assertEquals(0, rmmEventHandler.getAllocationCount());
   }
 
+  private RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> createDummyEventHandlerAdaptor() {
+    RmmDeviceMemoryResource resource = new RmmCudaMemoryResource();
+    RmmTrackingResourceAdaptor<RmmDeviceMemoryResource> trackingAdaptor = new RmmTrackingResourceAdaptor<>(resource, ALIGNMENT);
+    RmmEventHandler dummyHandler = new RmmEventHandler() {
+        @Override public long[] getAllocThresholds() { return null; }
+        @Override public long[] getDeallocThresholds() { return null; }
+        @Override public void onAllocThreshold(long totalAllocSize) {}
+        @Override public void onDeallocThreshold(long totalAllocSize) {}
+        @Override public boolean onAllocFailure(long sizeRequested, int retryCount) { return false; }
+    };
+    return new RmmEventHandlerResourceAdaptor<>(trackingAdaptor, dummyHandler, false);
+  }
+
+  @Test
+  public void testSparkResourceAdaptorConstructorWithBudgets() {
+    // RMM is initialized in @BeforeEach
+    try (RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> eventHandlerAdaptor = createDummyEventHandlerAdaptor();
+         SparkResourceAdaptor adaptor = new SparkResourceAdaptor(eventHandlerAdaptor, "stderr", 1024L * 1024L, 2048L * 1024L)) {
+      // Test passes if no exception is thrown during instantiation
+      assert(adaptor.isOpen());
+    }
+  }
+
+  @Test
+  public void testSetStageConfiguration() {
+    // RMM is initialized in @BeforeEach
+    try (RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> eventHandlerAdaptor = createDummyEventHandlerAdaptor();
+         SparkResourceAdaptor adaptor = new SparkResourceAdaptor(eventHandlerAdaptor, "stderr", 1024L * 1024L, 2048L * 1024L)) {
+      adaptor.setStageConfiguration(1L, 4, 2);
+      // Test passes if no exception is thrown
+    }
+  }
+
+  @Test
+  public void testTaskStarted() {
+    // RMM is initialized in @BeforeEach
+    try (RmmEventHandlerResourceAdaptor<RmmDeviceMemoryResource> eventHandlerAdaptor = createDummyEventHandlerAdaptor();
+         SparkResourceAdaptor adaptor = new SparkResourceAdaptor(eventHandlerAdaptor, "stderr", 1024L * 1024L, 2048L * 1024L)) {
+      adaptor.setStageConfiguration(1L, 2, 2);
+      adaptor.taskStarted(101L, 1L);
+      // Test passes if no exception is thrown
+    }
+  }
+
   private static class BaseRmmEventHandler implements RmmEventHandler {
     @Override
     public long[] getAllocThresholds() {
