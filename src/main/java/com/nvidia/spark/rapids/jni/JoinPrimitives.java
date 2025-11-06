@@ -38,9 +38,13 @@ public class JoinPrimitives {
   }
 
   /**
-   * Helper to convert gather map data from JNI to GatherMap array
+   * Helper to convert gather map data from JNI to GatherMap array.
+   * Package-private so other join classes can reuse this logic.
+   * 
+   * @param gatherMapData Array of [size_in_bytes, left_addr, left_handle, right_addr, right_handle]
+   * @return Array of two GatherMaps [left_map, right_map]
    */
-  private static GatherMap[] gatherMapsFromJNI(long[] gatherMapData) {
+  static GatherMap[] gatherMapsFromJNI(long[] gatherMapData) {
     long bufferSize = gatherMapData[0];
     long leftAddr = gatherMapData[1];
     long leftHandle = gatherMapData[2];
@@ -53,9 +57,16 @@ public class JoinPrimitives {
   }
 
   /**
-   * Helper to convert single gather map data from JNI to GatherMap
+   * Helper to convert single gather map data from JNI to GatherMap.
+   * Package-private so other join classes can reuse this logic.
+   * 
+   * @param gatherMapData Array of [size_in_bytes, addr, handle]
+   * @return Single GatherMap
    */
-  private static GatherMap gatherMapFromJNI(long bufferAddr, long bufferSize, long bufferHandle) {
+  static GatherMap gatherMapFromJNI(long[] gatherMapData) {
+    long bufferSize = gatherMapData[0];
+    long bufferAddr = gatherMapData[1];
+    long bufferHandle = gatherMapData[2];
     return new GatherMap(DeviceMemoryBuffer.fromRmm(bufferAddr, bufferSize, bufferHandle));
   }
 
@@ -251,7 +262,7 @@ public class JoinPrimitives {
       gatherMap.getBufferLength(),
       tableSize);
     
-    return gatherMapFromJNI(result[1], result[0], result[2]);
+    return gatherMapFromJNI(result);
   }
 
   /**
@@ -276,7 +287,7 @@ public class JoinPrimitives {
       gatherMap.getBufferLength(),
       tableSize);
     
-    return gatherMapFromJNI(result[1], result[0], result[2]);
+    return gatherMapFromJNI(result);
   }
 
   // =============================================================================

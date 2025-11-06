@@ -41,31 +41,37 @@ public class JoinPrimitivesTest {
    * Sentinel value used in gather maps to indicate null/unmatched rows.
    * This must match the sentinel value used in the C++ join primitives implementation.
    * This is needed because the spark rapids fixup code assumes this.
+   * Package-private so other test classes can use it.
    */
-  private static final int GATHER_MAP_SENTINEL = -2147483648; // INT32_MIN
+  static final int GATHER_MAP_SENTINEL = -2147483648; // INT32_MIN
 
   // =============================================================================
   // HELPER METHODS FOR ROBUST TESTING
+  // Package-private so other test classes can use them
   // =============================================================================
 
   /**
    * Converts a gather map index to an Integer value or null if it's the sentinel.
+   * Package-private so other test classes can use it.
+   * 
    * @param index The gather map index
    * @param tableSize The size of the table being gathered from (unused with 
    * sentinel approach, but kept for future extensibility)
    * @return Integer value if valid index, null if sentinel value
    */
-  private static Integer gatherMapIndexToValue(int index, long tableSize) {
+  static Integer gatherMapIndexToValue(int index, long tableSize) {
     return (index == GATHER_MAP_SENTINEL) ? null : Integer.valueOf(index);
   }
 
   /**
    * Converts a single gather map to a Set of Integer values (nulls for OOB indices).
+   * Package-private so other test classes can use it.
+   * 
    * @param gatherMap The gather map column vector
    * @param tableSize The size of the table being gathered from
    * @return Set of Integer values (null represents OOB/unmatched)
    */
-  private static Set<Integer> gatherMapToSet(HostColumnVector gatherMap, long tableSize) {
+  static Set<Integer> gatherMapToSet(HostColumnVector gatherMap, long tableSize) {
     Set<Integer> result = new HashSet<>();
     for (int i = 0; i < gatherMap.getRowCount(); i++) {
       result.add(gatherMapIndexToValue(gatherMap.getInt(i), tableSize));
@@ -75,13 +81,15 @@ public class JoinPrimitivesTest {
 
   /**
    * Converts a pair of gather maps to a Set of Map.Entry pairs.
+   * Package-private so other test classes can use it.
+   * 
    * @param leftMap The left gather map
    * @param rightMap The right gather map
    * @param leftTableSize The size of the left table
    * @param rightTableSize The size of the right table
    * @return Set of (left, right) pairs (nulls represent OOB/unmatched)
    */
-  private static Set<Map.Entry<Integer, Integer>> gatherMapPairToSet(
+  static Set<Map.Entry<Integer, Integer>> gatherMapPairToSet(
       HostColumnVector leftMap, HostColumnVector rightMap, long leftTableSize, long rightTableSize) {
     assertEquals(leftMap.getRowCount(), rightMap.getRowCount(), 
         "Left and right gather maps must have same row count");
@@ -97,8 +105,9 @@ public class JoinPrimitivesTest {
 
   /**
    * Asserts that two sets of gather map indices are equal, with detailed error message.
+   * Package-private so other test classes can use it.
    */
-  private static void assertGatherMapSetEquals(
+  static void assertGatherMapSetEquals(
       Set<Integer> expected, Set<Integer> actual, String message) {
     if (!expected.equals(actual)) {
       Set<Integer> missing = new HashSet<>(expected);
@@ -116,8 +125,9 @@ public class JoinPrimitivesTest {
 
   /**
    * Asserts that two sets of gather map pairs are equal, with detailed error message.
+   * Package-private so other test classes can use it.
    */
-  private static void assertGatherMapPairSetEquals(
+  static void assertGatherMapPairSetEquals(
       Set<Map.Entry<Integer, Integer>> expected, 
       Set<Map.Entry<Integer, Integer>> actual, 
       String message) {
@@ -137,22 +147,25 @@ public class JoinPrimitivesTest {
 
   /**
    * Helper to create a set of expected gather map pairs.
+   * Package-private so other test classes can use it.
    */
   @SafeVarargs
-  private static Set<Map.Entry<Integer, Integer>> pairSet(Map.Entry<Integer, Integer>... pairs) {
+  static Set<Map.Entry<Integer, Integer>> pairSet(Map.Entry<Integer, Integer>... pairs) {
     return new HashSet<>(Arrays.asList(pairs));
   }
 
   /**
    * Helper to create a Map.Entry pair.
+   * Package-private so other test classes can use it.
    */
-  private static Map.Entry<Integer, Integer> pair(Integer left, Integer right) {
+  static Map.Entry<Integer, Integer> pair(Integer left, Integer right) {
     return new AbstractMap.SimpleEntry<>(left, right);
   }
 
   /**
    * High-level assertion for paired gather maps (e.g., inner, outer joins).
    * Copies gather maps to host, converts to set, and asserts equality.
+   * Package-private so other test classes can use it.
    * 
    * @param gatherMaps The GPU gather map pair to validate
    * @param leftTableSize Size of the left table
@@ -160,7 +173,7 @@ public class JoinPrimitivesTest {
    * @param expected Expected set of (left, right) index pairs
    * @param message Error message prefix
    */
-  private static void assertGatherMapPairs(
+  static void assertGatherMapPairs(
       GatherMap[] gatherMaps,
       long leftTableSize,
       long rightTableSize,
@@ -187,13 +200,14 @@ public class JoinPrimitivesTest {
   /**
    * High-level assertion for single gather maps (e.g., semi, anti joins).
    * Copies gather map to host, converts to set, and asserts equality.
+   * Package-private so other test classes can use it.
    * 
    * @param gatherMap The GPU gather map to validate
    * @param tableSize Size of the table being gathered from
    * @param expected Expected set of indices
    * @param message Error message prefix
    */
-  private static void assertGatherMapIndices(
+  static void assertGatherMapIndices(
       GatherMap gatherMap,
       long tableSize,
       Set<Integer> expected,

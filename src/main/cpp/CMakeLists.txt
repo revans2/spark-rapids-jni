@@ -205,6 +205,10 @@ add_library(
   src/map_zip_with_utils.cu
   src/MapJni.cpp
   src/JoinPrimitivesJni.cpp
+  src/HashJoinJni.cpp
+  src/DistinctHashJoinJni.cpp
+  src/FilteredJoinJni.cpp
+  src/SortMergeJoinJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
   src/ParseURIJni.cpp
