@@ -152,10 +152,11 @@ public class KeyRemapping {
       // 2. Create dense integer sequence (0, 1, 2, ..., numDistinct-1)
       // We use 0-based sequence so that Integer.MIN_VALUE can be used as sentinel
       int numDistinct = (int) distinctKeys.getRowCount();
-      ColumnVector intSequence = ColumnVector.sequence(
-        Scalar.fromInt(0),
-        Scalar.fromInt(1),
-        numDistinct);
+      ColumnVector intSequence;
+      try (Scalar start = Scalar.fromInt(0);
+           Scalar step = Scalar.fromInt(1)) {
+        intSequence = ColumnVector.sequence(start, step, numDistinct);
+      }
       
       try {
         Table intSequenceTable = new Table(intSequence);
@@ -223,7 +224,10 @@ public class KeyRemapping {
       try {
         // Replace nulls with Integer.MIN_VALUE sentinel
         // This ensures unmatched keys don't falsely match in the actual join
-        ColumnVector result = gathered.getColumn(0).replaceNulls(Scalar.fromInt(Integer.MIN_VALUE));
+        ColumnVector result;
+        try (Scalar sentinel = Scalar.fromInt(Integer.MIN_VALUE)) {
+          result = gathered.getColumn(0).replaceNulls(sentinel);
+        }
         return result;
       } finally {
         gathered.close();
