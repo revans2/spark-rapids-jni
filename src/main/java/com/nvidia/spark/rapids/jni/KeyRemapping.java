@@ -159,7 +159,12 @@ public class KeyRemapping {
       }
       
       try {
-        Table intSequenceTable = new Table(intSequence);
+        Table intSequenceTable;
+        try {
+          intSequenceTable = new Table(intSequence);
+        } finally {
+          intSequence.close();
+        }
         
         try {
           // 3. Create DistinctHashJoin for the distinct keys
