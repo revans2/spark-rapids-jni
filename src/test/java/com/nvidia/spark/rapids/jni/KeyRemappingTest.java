@@ -62,15 +62,26 @@ public class KeyRemappingTest {
   }
 
   /**
+   * Verify that the build side remapping is correct (defaults to nullsEqual=true).
+   * 
+   * @param buildKeys The original build keys (host data)
+   * @param remappedBuild The remapped IDs (host data)
+   */
+  private void verifyBuildRemapping(HostColumnVector[] buildKeys,
+                                    HostColumnVector remappedBuild) {
+    verifyBuildRemapping(buildKeys, remappedBuild, true);
+  }
+
+  /**
    * Verify that the build side remapping is correct.
    * 
    * @param buildKeys The original build keys (host data)
    * @param remappedBuild The remapped IDs (host data)
-   * @param distinctCount Expected number of distinct keys
+   * @param nullsEqual Whether nulls are considered equal
    */
   private void verifyBuildRemapping(HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild,
-                                    int distinctCount) {
+                                    boolean nullsEqual) {
     int rowCount = (int) remappedBuild.getRowCount();
     assertEquals(rowCount, buildKeys[0].getRowCount());
 
@@ -96,23 +107,35 @@ public class KeyRemappingTest {
       
       int assignedId = remappedBuild.getInt(i);
       
-      // Verify ID is in range [0, rowCount)
-      assertTrue(assignedId >= 0 && assignedId < rowCount,
-          "Build key ID " + assignedId + " should be in [0, " + rowCount + ") for key " + key);
-      
-      // Check consistency: same key should always get same ID
-      if (keyToId.containsKey(key)) {
-        assertEquals(keyToId.get(key), assignedId,
-            "Key " + key + " should always map to same ID");
-      } else {
-        keyToId.put(key, assignedId);
+      // With nullsEqual=false, null keys cannot be matched (null != null), so they get sentinel
+      boolean isNullKey = false;
+      for (Object val : keyValues) {
+        if (val == null) {
+          isNullKey = true;
+          break;
+        }
       }
       
-      assignedIds.add(assignedId);
+      if (!nullsEqual && isNullKey) {
+        // Null keys should get sentinel when nullsEqual=false
+        assertEquals(SENTINEL, assignedId,
+            "Null key should get sentinel when nullsEqual=false");
+      } else {
+        // Non-null keys (or nulls with nullsEqual=true) should get valid IDs
+        assertTrue(assignedId >= 0 && assignedId < rowCount,
+            "Build key ID " + assignedId + " should be in [0, " + rowCount + ") for key " + key);
+        
+        // Check consistency: same key should always get same ID
+        if (keyToId.containsKey(key)) {
+          assertEquals(keyToId.get(key), assignedId,
+              "Key " + key + " should always map to same ID");
+        } else {
+          keyToId.put(key, assignedId);
+        }
+        
+        assignedIds.add(assignedId);
+      }
     }
-    // Verify we used exactly distinctCount different IDs
-    assertEquals(distinctCount, keyToId.size(),
-        "Should have exactly " + distinctCount + " distinct keys");
     
     // Verify different keys got different IDs
     assertEquals(keyToId.size(), assignedIds.size(),
@@ -120,7 +143,7 @@ public class KeyRemappingTest {
   }
 
   /**
-   * Verify that the probe side remapping is correct and consistent with build side.
+   * Verify that the probe side remapping is correct (defaults to nullsEqual=true).
    * 
    * @param probeKeys The original probe keys (host data)
    * @param remappedProbe The remapped IDs (host data)
@@ -133,6 +156,25 @@ public class KeyRemappingTest {
                                     HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild,
                                     int sentinelValue) {
+    verifyProbeRemapping(probeKeys, remappedProbe, buildKeys, remappedBuild, sentinelValue, true);
+  }
+
+  /**
+   * Verify that the probe side remapping is correct and consistent with build side.
+   * 
+   * @param probeKeys The original probe keys (host data)
+   * @param remappedProbe The remapped IDs (host data)
+   * @param buildKeys The original build keys (host data) 
+   * @param remappedBuild The build remapped IDs (host data)
+   * @param sentinelValue Expected sentinel value for unmatched keys
+   * @param nullsEqual Whether nulls are considered equal
+   */
+  private void verifyProbeRemapping(HostColumnVector[] probeKeys,
+                                    HostColumnVector remappedProbe,
+                                    HostColumnVector[] buildKeys,
+                                    HostColumnVector remappedBuild,
+                                    int sentinelValue,
+                                    boolean nullsEqual) {
     int probeRowCount = (int) remappedProbe.getRowCount();
     int buildRowCount = (int) remappedBuild.getRowCount();
     
@@ -140,9 +182,11 @@ public class KeyRemappingTest {
     Map<Key, Integer> buildKeyToId = new HashMap<>();
     for (int i = 0; i < buildRowCount; i++) {
       Object[] keyValues = new Object[buildKeys.length];
+      boolean hasNull = false;
       for (int col = 0; col < buildKeys.length; col++) {
         if (buildKeys[col].isNull(i)) {
           keyValues[col] = null;
+          hasNull = true;
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.STRING)) {
           keyValues[col] = buildKeys[col].getJavaString(i);
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.INT32)) {
@@ -152,6 +196,12 @@ public class KeyRemappingTest {
         }
       }
       Key key = new Key(keyValues);
+      
+      // Skip null keys when nullsEqual=false (they get sentinel, not valid IDs)
+      if (!nullsEqual && hasNull) {
+        continue;
+      }
+      
       buildKeyToId.put(key, remappedBuild.getInt(i));
     }
     
@@ -173,7 +223,20 @@ public class KeyRemappingTest {
       
       int probeId = remappedProbe.getInt(i);
       
-      if (buildKeyToId.containsKey(key)) {
+      // Check if this is a null key
+      boolean isNullKey = false;
+      for (Object val : keyValues) {
+        if (val == null) {
+          isNullKey = true;
+          break;
+        }
+      }
+      
+      // With nullsEqual=false, null keys always get sentinel (can't match anything)
+      if (!nullsEqual && isNullKey) {
+        assertEquals(sentinelValue, probeId,
+            "Null probe key should get sentinel when nullsEqual=false");
+      } else if (buildKeyToId.containsKey(key)) {
         // Key exists in build side - should have same ID
         assertEquals(buildKeyToId.get(key), probeId,
             "Probe key " + key + " should have same ID as in build side");
@@ -196,8 +259,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
-
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
@@ -206,7 +267,7 @@ public class KeyRemappingTest {
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
         // Verify build side mapping
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         
         // Verify probe side mapping
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
@@ -226,7 +287,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(4, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -235,7 +295,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 4);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -253,7 +313,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -262,7 +321,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -280,7 +339,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -289,7 +347,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -310,7 +368,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol1, probeCol2);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
       
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -322,7 +379,7 @@ public class KeyRemappingTest {
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
         verifyBuildRemapping(new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, 
-                            hostBuild, 3);
+                            hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol1, hostProbeCol2}, hostProbe,
                             new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, hostBuild,
                             SENTINEL);
@@ -339,7 +396,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -347,7 +403,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         assertEquals(0, hostProbe.getRowCount());
       }
     }
@@ -362,7 +418,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -371,7 +426,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -386,13 +441,12 @@ public class KeyRemappingTest {
          Table buildKeys = new Table(buildCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
 
         // First probe
         try (ColumnVector probeCol1 = ColumnVector.fromInts(1, 2);
@@ -428,9 +482,6 @@ public class KeyRemappingTest {
       remap = KeyRemapping.createRemapStructures(buildKeys);
     }
 
-    // Verify distinct count is accessible
-    assertEquals(3, remap.getDistinctCount());
-
     // Close and verify cleanup
     assertDoesNotThrow(() -> remap.close());
   }
@@ -444,13 +495,12 @@ public class KeyRemappingTest {
          Table buildKeys = new Table(buildCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(4, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 4);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
       }
     }
   }
@@ -474,7 +524,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(1000, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -483,7 +532,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 1000);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -500,7 +549,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -509,7 +557,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -526,7 +574,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(3, remap.getDistinctCount());
       assertEquals(SENTINEL, KeyRemapping.getNotFoundSentinel());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
@@ -536,7 +583,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -556,7 +603,6 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, true)) {
 
-      assertEquals(3, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
@@ -565,7 +611,7 @@ public class KeyRemappingTest {
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 3);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -585,13 +631,12 @@ public class KeyRemappingTest {
          Table buildKeys = new Table(buildCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(10000, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 10000);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
       }
     }
   }
@@ -608,13 +653,245 @@ public class KeyRemappingTest {
          Table buildKeys = new Table(buildCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      assertEquals(10, remap.getDistinctCount());
 
       try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 10);
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingNullsNotEqual() {
+    // Test with nullsEqual=false - nulls cannot match (not even to themselves)
+    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(1, null, null, 3);
+         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 3);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, false)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        // Verify build and probe remapping with nullsEqual=false
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, false);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL, false);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingEmptyBuildTable() {
+    // Test with empty build table
+    try (ColumnVector buildCol = ColumnVector.fromInts();
+         ColumnVector probeCol = ColumnVector.fromInts(1, 2, 3);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        // All probe keys should get sentinel since build is empty
+        for (int i = 0; i < hostProbe.getRowCount(); i++) {
+          assertEquals(SENTINEL, hostProbe.getInt(i),
+              "Probe key should get sentinel when build table is empty");
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingClosedStructuresError() {
+    // Test that using closed RemapStructures throws an error
+    KeyRemapping.RemapStructures remap;
+    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 3);
+         Table buildKeys = new Table(buildCol)) {
+      remap = KeyRemapping.createRemapStructures(buildKeys);
+      remap.close();
+    }
+
+    // Trying to use closed RemapStructures should throw
+    KeyRemapping.RemapStructures finalRemap = remap;
+    assertThrows(IllegalStateException.class, () -> finalRemap.getNativeHandle());
+  }
+
+  @Test
+  public void testRemappingMultipleClose() {
+    // Test that closing RemapStructures multiple times is safe
+    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 3);
+         Table buildKeys = new Table(buildCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+      
+      remap.close();
+      // Second close should be safe
+      assertDoesNotThrow(() -> remap.close());
+    }
+  }
+
+  @Test
+  public void testRemappingMixedMultiColumn() {
+    // Test remapping with mixed-type multi-column keys (int and string)
+    try (ColumnVector buildCol1 = ColumnVector.fromInts(1, 2, 2, 3);
+         ColumnVector buildCol2 = ColumnVector.fromStrings("a", "b", "b", "c");
+         ColumnVector probeCol1 = ColumnVector.fromInts(2, 3, 4);
+         ColumnVector probeCol2 = ColumnVector.fromStrings("b", "c", "d");
+         Table buildKeys = new Table(buildCol1, buildCol2);
+         Table probeKeys = new Table(probeCol1, probeCol2);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      // Distinct keys: (1,a), (2,b), (3,c) = 3
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol1 = buildCol1.copyToHost();
+           HostColumnVector hostBuildCol2 = buildCol2.copyToHost();
+           HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
+           HostColumnVector hostProbeCol2 = probeCol2.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, 
+                            hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol1, hostProbeCol2}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingWithNullsInMultiColumn() {
+    // Test multi-column keys with nulls in various columns
+    try (ColumnVector buildCol1 = ColumnVector.fromBoxedInts(1, null, 2);
+         ColumnVector buildCol2 = ColumnVector.fromBoxedInts(10, 20, null);
+         ColumnVector probeCol1 = ColumnVector.fromBoxedInts(null, 2, 3);
+         ColumnVector probeCol2 = ColumnVector.fromBoxedInts(20, null, 30);
+         Table buildKeys = new Table(buildCol1, buildCol2);
+         Table probeKeys = new Table(probeCol1, probeCol2);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol1 = buildCol1.copyToHost();
+           HostColumnVector hostBuildCol2 = buildCol2.copyToHost();
+           HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
+           HostColumnVector hostProbeCol2 = probeCol2.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, 
+                            hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol1, hostProbeCol2}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol1, hostBuildCol2}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingStringsWithNulls() {
+    // Test string keys with nulls
+    try (ColumnVector buildCol = ColumnVector.fromStrings("apple", null, "cherry", null);
+         ColumnVector probeCol = ColumnVector.fromStrings(null, "cherry", "durian");
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, true)) {
+
+      // Distinct: "apple", null, "cherry" = 3
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingSentinelIsNegative() {
+    // Verify sentinel is always negative
+    int sentinel = KeyRemapping.getNotFoundSentinel();
+    assertTrue(sentinel < 0, "Sentinel value should be negative, got: " + sentinel);
+    
+    // Verify it's consistent
+    assertEquals(sentinel, KeyRemapping.getNotFoundSentinel(),
+        "Sentinel should be consistent across calls");
+  }
+
+  @Test
+  public void testRemappingBuildKeysAllSame() {
+    // Test with all build keys being the same value
+    try (ColumnVector buildCol = ColumnVector.fromInts(5, 5, 5, 5, 5);
+         ColumnVector probeCol = ColumnVector.fromInts(5, 6);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        
+        // All build keys should have same remapped value
+        int firstId = hostBuild.getInt(0);
+        for (int i = 1; i < hostBuild.getRowCount(); i++) {
+          assertEquals(firstId, hostBuild.getInt(i),
+              "All identical keys should have same remapped ID");
+        }
+        
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testRemappingEmptyStrings() {
+    // Test with empty strings
+    try (ColumnVector buildCol = ColumnVector.fromStrings("", "a", "");
+         ColumnVector probeCol = ColumnVector.fromStrings("", "b");
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      // Distinct: "", "a" = 2
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
       }
     }
   }

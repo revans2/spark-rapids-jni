@@ -85,34 +85,6 @@ Java_com_nvidia_spark_rapids_jni_KeyRemapping_getNotFoundSentinelNative(JNIEnv* 
 }
 
 /**
- * @brief Get the distinct count from a key remap structure.
- *
- * Java signature:
- * private static native int getDistinctCountNative(long remapHandle);
- *
- * @param env JNI environment
- * @param clazz Java class
- * @param j_remap_handle Handle to the key_remap_build_result
- * @return Number of distinct keys
- */
-JNIEXPORT jint JNICALL
-Java_com_nvidia_spark_rapids_jni_KeyRemapping_getDistinctCountNative(JNIEnv* env,
-                                                                      jclass clazz,
-                                                                      jlong j_remap_handle)
-{
-  JNI_NULL_CHECK(env, j_remap_handle, "remap handle is null", 0);
-
-  JNI_TRY
-  {
-    cudf::jni::auto_set_device(env);
-
-    auto const* result = reinterpret_cast<spark_rapids_jni::key_remap_build_result*>(j_remap_handle);
-    return static_cast<jint>(result->distinct_count);
-  }
-  JNI_CATCH(env, 0);
-}
-
-/**
  * @brief Apply key remapping to input keys.
  *
  * Java signature:

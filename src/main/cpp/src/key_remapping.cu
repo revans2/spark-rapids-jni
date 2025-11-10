@@ -134,10 +134,10 @@ struct typed_hash_map_holder : hash_map_holder {
 };
 
 /**
- * @brief Build the hash map from input keys and return the distinct count
+ * @brief Build the hash map from input keys
  */
 template <bool has_nested>
-std::pair<std::unique_ptr<hash_map_holder>, cudf::size_type> build_map_impl(
+std::unique_ptr<hash_map_holder> build_map_impl(
   cudf::table_view const& input,
   cudf::detail::row::hash::row_hasher const& row_hash,
   cudf::detail::row::equality::self_comparator const& row_equal,
@@ -168,14 +168,12 @@ std::pair<std::unique_ptr<hash_map_holder>, cudf::size_type> build_map_impl(
     rmm::mr::polymorphic_allocator<char>{},
     stream.value()};
 
-  rmm::device_scalar<cudf::size_type> distinct_counter(0, stream, mr);
-
   auto map_ref = map.ref(cuco::op::insert_and_find);
   thrust::for_each(
     rmm::exec_policy_nosync(stream),
     thrust::make_counting_iterator(0),
     thrust::make_counting_iterator(num_rows),
-    [map_ref, d_hasher, counter_ptr = distinct_counter.data()] __device__(cudf::size_type idx) mutable {
+    [map_ref, d_hasher] __device__(cudf::size_type idx) mutable {
       auto const row_hash = d_hasher(idx);
       using rhs_type      = cudf::detail::row::rhs_index_type;
       auto [iter, inserted] =
@@ -183,18 +181,13 @@ std::pair<std::unique_ptr<hash_map_holder>, cudf::size_type> build_map_impl(
 
       if (inserted) {
         iter->second = idx;
-        cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device>{*counter_ptr}.fetch_add(
-          1, cuda::memory_order_relaxed);
       }
     });
-
-  stream.synchronize();
-  auto const distinct_count = distinct_counter.value(stream);
 
   auto holder =
     std::make_unique<typed_hash_map_holder<has_nested>>(std::move(map));
 
-  return {std::move(holder), distinct_count};
+  return holder;
 }
 
 /**
@@ -258,8 +251,6 @@ std::unique_ptr<cudf::column> lookup_keys_two_table(
   return output;
 }
 
-// No longer needed - we don't use comparator during build
-
 }  // anonymous namespace
 
 // Destructor implementation
@@ -278,7 +269,6 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
   if (input_keys.num_rows() == 0 || input_keys.num_columns() == 0) {
     auto result            = std::make_unique<key_remap_build_result>();
     result->hash_map_ptr   = nullptr;
-    result->distinct_count = 0;
     result->nulls_equal    = nulls_equal;
     result->has_nested_columns = has_nested_columns;
     return result;
@@ -299,20 +289,18 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
     cudf::detail::row::equality::self_comparator(preprocessed_equal);
 
   std::unique_ptr<hash_map_holder> map_holder;
-  cudf::size_type distinct_count = 0;
 
   if (has_nested_columns) {
-    std::tie(map_holder, distinct_count) = build_map_impl<true>(
+    map_holder = build_map_impl<true>(
       input_keys, row_hash, self_equal, has_nulls, nulls_equal, stream, mr);
   } else {
-    std::tie(map_holder, distinct_count) = build_map_impl<false>(
+    map_holder = build_map_impl<false>(
       input_keys, row_hash, self_equal, has_nulls, nulls_equal, stream, mr);
   }
 
   // Create the result
   auto result            = std::make_unique<key_remap_build_result>();
   result->hash_map_ptr   = map_holder.release();
-  result->distinct_count = distinct_count;
   result->nulls_equal    = nulls_equal;
   result->has_nested_columns = has_nested_columns;
 
@@ -328,6 +316,17 @@ std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys
   if (input_keys.num_rows() == 0 || input_keys.num_columns() == 0) {
     return cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::INT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr);
+  }
+
+  // If build table was empty (hash_map_ptr is nullptr), all probe keys map to sentinel
+  if (remap_result.hash_map_ptr == nullptr) {
+    auto output = cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::INT32}, input_keys.num_rows(), cudf::mask_state::UNALLOCATED, stream, mr);
+    thrust::fill(rmm::exec_policy(stream),
+                 output->mutable_view().begin<cudf::size_type>(),
+                 output->mutable_view().end<cudf::size_type>(),
+                 cudf::detail::CUDF_SIZE_TYPE_SENTINEL);
+    return output;
   }
 
   // Preprocess both tables for two-table comparison

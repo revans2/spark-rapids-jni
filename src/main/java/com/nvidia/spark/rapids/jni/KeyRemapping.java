@@ -33,9 +33,6 @@ import ai.rapids.cudf.Table;
  * <pre>{@code
  * // ONE-TIME SETUP (cache these across iterations):
  * try (RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
- *   // Get distinct count for heuristics if needed
- *   int distinctCount = remap.getDistinctCount();
- *   
  *   // FOR EACH ITERATION:
  *   // 1. Remap build keys
  *   try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap)) {
@@ -70,30 +67,10 @@ public class KeyRemapping {
     private long nativeHandle;
     private Table buildKeys;  // Keep the original build keys for two-table lookups
     private boolean closed = false;
-    private int distinctCount = -1;  // Cached value
 
     private RemapStructures(long nativeHandle, Table buildKeys) {
       this.nativeHandle = nativeHandle;
       this.buildKeys = buildKeys;
-    }
-
-    /**
-     * Get the number of distinct keys in the remapping structure.
-     * <p>
-     * This is useful for heuristics to decide whether remapping is beneficial,
-     * or to choose between different join strategies based on cardinality.
-     * </p>
-     * 
-     * @return The number of distinct keys found during remapping
-     */
-    public int getDistinctCount() {
-      if (closed) {
-        throw new IllegalStateException("RemapStructures is already closed");
-      }
-      if (distinctCount < 0) {
-        distinctCount = getDistinctCountNative(nativeHandle);
-      }
-      return distinctCount;
     }
 
     /**
@@ -211,14 +188,6 @@ public class KeyRemapping {
    * @return Native handle to the remapping structure
    */
   private static native long buildKeyRemapNative(long inputKeysHandle, boolean nullsEqual);
-
-  /**
-   * Get the distinct count from a remapping structure.
-   *
-   * @param remapHandle Native handle to the remapping structure
-   * @return Number of distinct keys
-   */
-  private static native int getDistinctCountNative(long remapHandle);
 
   /**
    * Apply key remapping to input keys.

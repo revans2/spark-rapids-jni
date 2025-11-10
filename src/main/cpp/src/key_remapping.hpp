@@ -30,11 +30,10 @@ namespace spark_rapids_jni {
 /**
  * @brief Result of building a key remapping structure.
  *
- * Contains the hash map for remapping and the count of distinct keys.
+ * Contains the hash map for remapping.
  */
 struct key_remap_build_result {
   void* hash_map_ptr;              // Opaque pointer to the hash map implementation
-  cudf::size_type distinct_count;   // Number of distinct keys found
   cudf::null_equality nulls_equal;  // Whether nulls are considered equal
   bool has_nested_columns;          // Whether the keys contained nested columns
 
@@ -44,14 +43,14 @@ struct key_remap_build_result {
 /**
  * @brief Build a key remapping hash map from input keys.
  *
- * Creates a hash map that assigns unique integer IDs (0, 1, 2, ...) to distinct keys.
- * This is a single-pass operation that builds the hash map and extracts distinct keys.
+ * Creates a hash map that assigns unique integer IDs to distinct keys.
+ * This is a single-pass operation that builds the hash map.
  *
  * @param input_keys The input table containing the keys to remap
  * @param nulls_equal Whether to treat null keys as equal
  * @param stream CUDA stream for device operations
  * @param mr Device memory resource
- * @return A structure containing the distinct keys and the hash map
+ * @return A structure containing the hash map
  */
 std::unique_ptr<key_remap_build_result> build_key_remap_map(
   cudf::table_view const& input_keys,
