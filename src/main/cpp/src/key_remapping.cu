@@ -271,6 +271,7 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
     result->hash_map_ptr   = nullptr;
     result->nulls_equal    = nulls_equal;
     result->has_nested_columns = has_nested_columns;
+    result->preprocessed_build = nullptr;
     return result;
   }
 
@@ -282,8 +283,8 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
 
   auto const row_hash = cudf::detail::row::hash::row_hasher(preprocessed_input);
 
-  // Preprocess input for equality comparisons (row equality)
-  auto const preprocessed_equal =
+  // Preprocess input for equality comparisons (row equality) and cache for reuse
+  auto preprocessed_equal =
     cudf::detail::row::equality::preprocessed_table::create(input_keys, stream);
   auto const self_equal =
     cudf::detail::row::equality::self_comparator(preprocessed_equal);
@@ -303,6 +304,9 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
   result->hash_map_ptr   = map_holder.release();
   result->nulls_equal    = nulls_equal;
   result->has_nested_columns = has_nested_columns;
+  
+  // Cache the preprocessed build table for reuse across multiple probe operations
+  result->preprocessed_build = std::move(preprocessed_equal);
 
   return result;
 }
@@ -329,10 +333,9 @@ std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys
     return output;
   }
 
-  // Preprocess both tables for two-table comparison
-  auto const preprocessed_build =
-    cudf::detail::row::equality::preprocessed_table::create(build_keys, stream);
-  auto const preprocessed_probe =
+  // Only preprocess the probe table (changes with each call)
+  // Use cached preprocessed build table (created once during build phase)
+  auto preprocessed_probe =
     cudf::detail::row::equality::preprocessed_table::create(input_keys, stream);
     
   auto const has_nulls =
@@ -342,7 +345,7 @@ std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys
 
   // Create two-table comparator (probe -> build)
   auto const two_table_equal =
-    cudf::detail::row::equality::two_table_comparator(preprocessed_probe, preprocessed_build);
+    cudf::detail::row::equality::two_table_comparator(preprocessed_probe, remap_result.preprocessed_build);
 
   // Create probe hasher
   auto const probe_hasher = cudf::detail::row::hash::row_hasher(preprocessed_probe);

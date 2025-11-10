@@ -25,17 +25,25 @@
 
 #include <memory>
 
+// Forward declaration to avoid including .cuh in .hpp
+namespace cudf::detail::row::equality {
+class preprocessed_table;
+}
+
 namespace spark_rapids_jni {
 
 /**
  * @brief Result of building a key remapping structure.
  *
- * Contains the hash map for remapping.
+ * Contains the hash map for remapping and cached preprocessed build table.
  */
 struct key_remap_build_result {
   void* hash_map_ptr;              // Opaque pointer to the hash map implementation
   cudf::null_equality nulls_equal;  // Whether nulls are considered equal
   bool has_nested_columns;          // Whether the keys contained nested columns
+  
+  // Cached preprocessed build table for efficient reuse across multiple probe operations
+  std::shared_ptr<cudf::detail::row::equality::preprocessed_table> preprocessed_build;
 
   ~key_remap_build_result();
 };
