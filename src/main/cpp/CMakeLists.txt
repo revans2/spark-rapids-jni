@@ -209,6 +209,7 @@ add_library(
   src/DistinctHashJoinJni.cpp
   src/FilteredJoinJni.cpp
   src/SortMergeJoinJni.cpp
+  src/KeyRemappingJni.cpp
   src/NativeParquetJni.cpp
   src/NumberConverterJni.cpp
   src/ParseURIJni.cpp
@@ -244,6 +245,7 @@ add_library(
   src/list_slice.cu
   src/map.cu
   src/join_primitives.cu
+  src/key_remapping.cu
   src/multiply.cu
   src/murmur_hash.cu
   src/number_converter.cu

@@ -17,40 +17,32 @@
 package com.nvidia.spark.rapids.jni;
 
 import ai.rapids.cudf.ColumnVector;
-import ai.rapids.cudf.GatherMap;
-import ai.rapids.cudf.OutOfBoundsPolicy;
-import ai.rapids.cudf.Scalar;
+import ai.rapids.cudf.NativeDepsLoader;
 import ai.rapids.cudf.Table;
 
 /**
  * Utilities for remapping complex join keys (String, Decimal) to dense integer keys.
  * <p>
  * This optimization can improve join performance by converting complex key types to integers.
- * The remapping process:
- * <ol>
- *   <li>Extract distinct keys from the build side</li>
- *   <li>Create a dense integer sequence (0, 1, 2, ..., numDistinct-1)</li>
- *   <li>Create a DistinctHashJoin object to perform the remapping</li>
- *   <li>Use left join to remap keys (unmatched keys get sentinel value Integer.MIN_VALUE)</li>
- * </ol>
+ * Each distinct key that appears on the build side is assigned a stable non-negative integer.
+ * Keys that do not appear on the build side map to a negative sentinel value (see
+ * {@link #getNotFoundSentinel()}).
  * </p>
  * <p>
- * <b>Usage pattern for benchmarking:</b>
+ * <b>Usage pattern:</b>
  * <pre>{@code
  * // ONE-TIME SETUP (cache these across iterations):
  * try (RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+ *   // Get distinct count for heuristics if needed
+ *   int distinctCount = remap.getDistinctCount();
  *   
  *   // FOR EACH ITERATION:
  *   // 1. Remap build keys
  *   try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap)) {
  *     // 2. Remap probe keys
  *     try (ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap)) {
- *       // 3. Create join tables with remapped keys
- *       try (Table buildTable = new Table(remappedBuild);
- *            Table probeTable = new Table(remappedProbe)) {
- *         // 4. Perform join with integer keys
- *         // ...
- *       }
+ *       // 3. Perform join with integer keys
+ *       // Keys are mapped to non-negative integers. Unmatched keys return a negative sentinel.
  *     }
  *   }
  * }
@@ -59,187 +51,199 @@ import ai.rapids.cudf.Table;
  */
 public class KeyRemapping {
 
+  static {
+    NativeDepsLoader.loadNativeDeps();
+  }
+
   /**
    * Container for remapping structures that can be cached and reused.
+   * <p>
+   * This provides a high-performance remapping table.
+   * Each distinct build-side key is assigned a stable non-negative integer value for the lifetime
+   * of the structure.
+   * </p>
    * <p>
    * All resources must be closed when no longer needed.
    * </p>
    */
   public static class RemapStructures implements AutoCloseable {
-    private final Table distinctKeys;
-    private final Table intSequenceTable;
-    private final DistinctHashJoin remapJoinObject;
+    private long nativeHandle;
+    private Table buildKeys;  // Keep the original build keys for two-table lookups
+    private boolean closed = false;
+    private int distinctCount = -1;  // Cached value
 
-    private RemapStructures(Table distinctKeys, Table intSequenceTable,
-                            DistinctHashJoin remapJoinObject) {
-      this.distinctKeys = distinctKeys;
-      this.intSequenceTable = intSequenceTable;
-      this.remapJoinObject = remapJoinObject;
+    private RemapStructures(long nativeHandle, Table buildKeys) {
+      this.nativeHandle = nativeHandle;
+      this.buildKeys = buildKeys;
     }
 
     /**
-     * Get the distinct keys extracted from the build side.
+     * Get the number of distinct keys in the remapping structure.
      * <p>
-     * <b>Note:</b> This Table is owned by the RemapStructures and will be closed when
-     * RemapStructures is closed. Do not close it separately.
+     * This is useful for heuristics to decide whether remapping is beneficial,
+     * or to choose between different join strategies based on cardinality.
      * </p>
+     * 
+     * @return The number of distinct keys found during remapping
      */
-    public Table getDistinctKeys() {
-      return distinctKeys;
+    public int getDistinctCount() {
+      if (closed) {
+        throw new IllegalStateException("RemapStructures is already closed");
+      }
+      if (distinctCount < 0) {
+        distinctCount = getDistinctCountNative(nativeHandle);
+      }
+      return distinctCount;
     }
 
     /**
-     * Get the integer sequence table used for remapping.
+     * Get the native handle to the remapping structure.
      * <p>
-     * <b>Note:</b> This Table is owned by the RemapStructures and will be closed when
-     * RemapStructures is closed. Do not close it separately.
+     * <b>Internal use only.</b>
      * </p>
      */
-    public Table getIntSequenceTable() {
-      return intSequenceTable;
-    }
-
-    /**
-     * Get the distinct hash join object used for remapping.
-     * <p>
-     * <b>Note:</b> This DistinctHashJoin is owned by the RemapStructures and will be closed
-     * when RemapStructures is closed. Do not close it separately.
-     * </p>
-     */
-    public DistinctHashJoin getRemapJoinObject() {
-      return remapJoinObject;
+    long getNativeHandle() {
+      if (closed) {
+        throw new IllegalStateException("RemapStructures is already closed");
+      }
+      return nativeHandle;
     }
 
     @Override
     public void close() {
-      if (remapJoinObject != null) {
-        remapJoinObject.close();
-      }
-      if (intSequenceTable != null) {
-        intSequenceTable.close();
-      }
-      if (distinctKeys != null) {
-        distinctKeys.close();
+      if (!closed) {
+        if (nativeHandle != 0) {
+          freeKeyRemapNative(nativeHandle);
+          nativeHandle = 0;
+        }
+        // Note: We don't close buildKeys here because we don't own it
+        // The caller is responsible for managing the buildKeys lifetime
+        buildKeys = null;
+        closed = true;
       }
     }
   }
 
   /**
-   * Create remapping structures from build-side keys.
+   * Create remapping structures from build-side keys using native implementation.
    * <p>
-   * This extracts distinct keys, creates an integer sequence, and builds a DistinctHashJoin
-   * object for remapping. These structures can be cached and reused across multiple join
-   * operations.
+   * Builds a remapping table where each distinct build-side key is assigned a stable, non-negative
+   * integer value for the lifetime of the returned structure.
    * </p>
    * <p>
-   * The integer sequence uses 0-based integers (0, 1, 2, ..., numDistinct-1), which reserves
-   * Integer.MIN_VALUE as a sentinel value for unmatched keys.
+   * <b>IMPORTANT:</b> The returned RemapStructures retains a reference to the provided buildKeys
+   * table. The caller must keep buildKeys alive and unclosed for as long as the RemapStructures
+   * instance remains in use (or until it is closed).
    * </p>
    *
    * @param buildKeys The build-side join keys from which to extract distinct values
-   * @return RemapStructures containing the distinct keys, integer sequence, and join object
+   * @return RemapStructures containing the native hash map
    */
   public static RemapStructures createRemapStructures(Table buildKeys) {
-    // 1. Get distinct keys from build side
-    // Create array of all column indices
-    int[] keyColumns = new int[buildKeys.getNumberOfColumns()];
-    for (int i = 0; i < keyColumns.length; i++) {
-      keyColumns[i] = i;
-    }
-    Table distinctKeys = buildKeys.dropDuplicates(keyColumns, Table.DuplicateKeepOption.KEEP_FIRST, true);
-    
-    try {
-      // 2. Create dense integer sequence (0, 1, 2, ..., numDistinct-1)
-      // We use 0-based sequence so that Integer.MIN_VALUE can be used as sentinel
-      int numDistinct = (int) distinctKeys.getRowCount();
-      ColumnVector intSequence;
-      try (Scalar start = Scalar.fromInt(0);
-           Scalar step = Scalar.fromInt(1)) {
-        intSequence = ColumnVector.sequence(start, step, numDistinct);
-      }
-      
-      try {
-        Table intSequenceTable;
-        try {
-          intSequenceTable = new Table(intSequence);
-        } finally {
-          intSequence.close();
-        }
-        
-        try {
-          // 3. Create DistinctHashJoin for the distinct keys
-          // This will be used to remap both build and probe keys
-          DistinctHashJoin remapJoinObject = DistinctHashJoin.create(
-            distinctKeys,
-            true  // compareNullsEqual - treat nulls as equal during remapping
-          );
-          
-          try {
-            return new RemapStructures(distinctKeys, intSequenceTable, remapJoinObject);
-          } catch (Exception e) {
-            remapJoinObject.close();
-            throw e;
-          }
-        } catch (Exception e) {
-          intSequenceTable.close();
-          throw e;
-        }
-      } catch (Exception e) {
-        intSequence.close();
-        throw e;
-      }
-    } catch (Exception e) {
-      distinctKeys.close();
-      throw e;
-    }
+    return createRemapStructures(buildKeys, true);
   }
 
   /**
-   * Apply key remapping to a set of keys using cached remapping structures.
+   * Create remapping structures from build-side keys using native implementation.
    * <p>
-   * This remaps the input keys to dense integers based on the distinct keys from the build side.
-   * Keys that don't exist in the build-side distinct keys are mapped to Integer.MIN_VALUE as a
-   * sentinel value.
+   * Builds a remapping table where each distinct build-side key is assigned a stable, non-negative
+   * integer value for the lifetime of the returned structure.
    * </p>
    * <p>
-   * <b>Implementation details:</b>
-   * <ul>
-   *   <li>Uses left join to ensure every input key gets a mapping</li>
-   *   <li>Gathers from integer sequence with NULLIFY policy for unmatched keys</li>
-   *   <li>Replaces nulls with Integer.MIN_VALUE sentinel</li>
-   * </ul>
+   * <b>IMPORTANT:</b> The returned RemapStructures retains a reference to the provided buildKeys
+   * table. The caller must keep buildKeys alive and unclosed for as long as the RemapStructures
+   * instance remains in use (or until it is closed).
+   * </p>
+   *
+   * @param buildKeys The build-side join keys from which to extract distinct values
+   * @param compareNullsEqual Whether null key values should be considered equal
+   * @return RemapStructures containing the native hash map
+   */
+  public static RemapStructures createRemapStructures(Table buildKeys,
+                                                      boolean compareNullsEqual) {
+    long nativeHandle = buildKeyRemapNative(buildKeys.getNativeView(), compareNullsEqual);
+
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Failed to build key remapping structure");
+    }
+
+    return new RemapStructures(nativeHandle, buildKeys);
+  }
+
+  /**
+   * Apply key remapping using the native implementation.
+   * <p>
+   * Applies the remapping contract to the supplied keys. Values that correspond to build-side keys
+   * return the non-negative integer assigned during creation. Keys that were not present in the
+   * build table return the negative sentinel reported by {@link #getNotFoundSentinel()}.
+   * <b>Note:</b> {@code remapStructures} must still hold a valid, unclosed reference to the original
+   * build keys table.
    * </p>
    *
    * @param keys The keys to remap (from either build or probe table)
    * @param remapStructures The cached remapping structures
    * @return ColumnVector containing the remapped integer keys (caller must close)
    */
-  public static ColumnVector applyRemapping(Table keys, RemapStructures remapStructures) {
-    // Use left join to handle keys not in the build-side distinct keys
-    // This ensures we get a row for every input key, even if not found
-    GatherMap buildIndices = remapStructures.getRemapJoinObject().leftJoin(keys);
-    
-    try {
-      // Gather from integer sequence table with NULLIFY policy
-      // For keys not found in distinct keys, this will produce null
-      Table gathered = remapStructures.getIntSequenceTable().gather(
-        buildIndices.toColumnView(0, (int) buildIndices.getRowCount()),
-        OutOfBoundsPolicy.NULLIFY);
-      
-      try {
-        // Replace nulls with Integer.MIN_VALUE sentinel
-        // This ensures unmatched keys don't falsely match in the actual join
-        ColumnVector result;
-        try (Scalar sentinel = Scalar.fromInt(Integer.MIN_VALUE)) {
-          result = gathered.getColumn(0).replaceNulls(sentinel);
-        }
-        return result;
-      } finally {
-        gathered.close();
-      }
-    } finally {
-      buildIndices.close();
-    }
+  public static ColumnVector applyRemapping(Table keys,
+                                            RemapStructures remapStructures) {
+    long columnHandle = applyKeyRemapNative(remapStructures.buildKeys.getNativeView(),
+                                            keys.getNativeView(),
+                                            remapStructures.getNativeHandle());
+    return new ColumnVector(columnHandle);
   }
+
+  /**
+   * Get the sentinel value returned when a key is not present in the build-side map.
+   *
+   * @return Sentinel value used for unmatched keys.
+   */
+  public static int getNotFoundSentinel() {
+    return getNotFoundSentinelNative();
+  }
+
+  // ==================== NATIVE METHOD DECLARATIONS ====================
+
+  /**
+   * Build a key remapping structure from input keys.
+   *
+   * @param inputKeysHandle Native handle to the input keys table
+   * @param nullsEqual Whether to treat null keys as equal
+   * @return Native handle to the remapping structure
+   */
+  private static native long buildKeyRemapNative(long inputKeysHandle, boolean nullsEqual);
+
+  /**
+   * Get the distinct count from a remapping structure.
+   *
+   * @param remapHandle Native handle to the remapping structure
+   * @return Number of distinct keys
+   */
+  private static native int getDistinctCountNative(long remapHandle);
+
+  /**
+   * Apply key remapping to input keys.
+   *
+   * @param buildKeysHandle Native handle to the build keys table
+   * @param inputKeysHandle Native handle to the input keys table
+   * @param remapHandle Native handle to the remapping structure
+   * @return Column handle for the remapped integer keys
+   */
+  private static native long applyKeyRemapNative(long buildKeysHandle,
+                                                 long inputKeysHandle,
+                                                 long remapHandle);
+
+  /**
+   * Get the sentinel value used when a key is not found.
+   *
+   * @return Sentinel value used by the native implementation.
+   */
+  private static native int getNotFoundSentinelNative();
+
+  /**
+   * Free the native remapping structure.
+   *
+   * @param remapHandle Native handle to the remapping structure
+   */
+  private static native void freeKeyRemapNative(long remapHandle);
 }
 
