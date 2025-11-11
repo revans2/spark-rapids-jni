@@ -33,13 +33,28 @@ class preprocessed_table;
 namespace spark_rapids_jni {
 
 /**
+ * @brief Null equality modes for key remapping
+ * 
+ * Determines how null values are compared at different levels of the data structure.
+ */
+enum class null_equality_mode : int32_t {
+  NULL_EQUAL = 0,      ///< All nulls are equal at every level
+  NULL_NOT_EQUAL = 1,  ///< No nulls are equal at any level
+  SPARK_EQUALITY = 2   ///< Top-level nulls not equal, nested nulls equal (Spark semantics)
+};
+
+// Sentinel values for key remapping
+constexpr cudf::size_type NOT_FOUND_SENTINEL = -1;  ///< Probe-side keys not in build table
+constexpr cudf::size_type BUILD_NULL_SENTINEL = -2;  ///< Build-side rows with top-level nulls
+
+/**
  * @brief Result of building a key remapping structure.
  *
  * Contains the hash map for remapping and cached preprocessed build table.
  */
 struct key_remap_build_result {
   void* hash_map_ptr;              // Opaque pointer to the hash map implementation
-  cudf::null_equality nulls_equal;  // Whether nulls are considered equal
+  null_equality_mode null_mode;     // Null equality mode for comparisons
   bool has_nested_columns;          // Whether the keys contained nested columns
   
   // Cached preprocessed build table for efficient reuse across multiple probe operations
@@ -55,27 +70,31 @@ struct key_remap_build_result {
  * This is a single-pass operation that builds the hash map.
  *
  * @param input_keys The input table containing the keys to remap
- * @param nulls_equal Whether to treat null keys as equal
+ * @param null_mode Null equality mode (NULL_EQUAL, NULL_NOT_EQUAL, or SPARK_EQUALITY)
  * @param stream CUDA stream for device operations
  * @param mr Device memory resource
  * @return A structure containing the hash map
  */
 std::unique_ptr<key_remap_build_result> build_key_remap_map(
   cudf::table_view const& input_keys,
-  cudf::null_equality nulls_equal,
+  null_equality_mode null_mode,
   rmm::cuda_stream_view stream              = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr         = cudf::get_current_device_resource_ref());
 
 /**
  * @brief Apply key remapping to input keys using a pre-built hash map.
  *
- * This performs a single-pass lookup in the hash map and returns the remapped integer IDs
- * corresponding to build-side row indices.
- * Keys not found in the hash map are assigned a sentinel value (-1).
+ * This performs a single-pass lookup in the hash map and returns the remapped integer IDs.
+ * The behavior depends on the null equality mode and whether this is the build or probe side:
+ * - Matching keys: Return non-negative integer (build table row index)
+ * - Non-matching probe keys: Return NOT_FOUND_SENTINEL (-1)
+ * - Build keys with top-level nulls (when applicable): Return BUILD_NULL_SENTINEL (-2)
  *
  * @param build_keys The original build keys used to create the hash map
  * @param input_keys The input table containing the keys to remap
  * @param remap_result The pre-built key remapping structure
+ * @param null_mode Null equality mode (must match the mode used during build)
+ * @param is_build_side True if remapping the build side, false for probe side
  * @param stream CUDA stream for device operations
  * @param mr Device memory resource
  * @return A column of INT32 values with the remapped keys
@@ -84,6 +103,8 @@ std::unique_ptr<cudf::column> apply_key_remap(
   cudf::table_view const& build_keys,
   cudf::table_view const& input_keys,
   key_remap_build_result const& remap_result,
+  null_equality_mode null_mode,
+  bool is_build_side,
   rmm::cuda_stream_view stream              = cudf::get_default_stream(),
   rmm::device_async_resource_ref mr         = cudf::get_current_device_resource_ref());
 
@@ -93,6 +114,26 @@ std::unique_ptr<cudf::column> apply_key_remap(
  * @param hash_map_ptr Opaque pointer to the hash map
  */
 void free_key_remap_map(void* hash_map_ptr);
+
+/**
+ * @brief Dump the raw contents of the remapping hash map for debugging.
+ *
+ * Returns a table with three INT32 columns showing the internal map structure:
+ * - Column 0: Hash values (UINT32)
+ * - Column 1: Key row indices from the build table (INT32)
+ * - Column 2: Mapped values (INT32)
+ *
+ * @param build_keys The original build keys used to create the hash map (unused, kept for API consistency)
+ * @param remap_result The pre-built key remapping structure
+ * @param stream CUDA stream for device operations
+ * @param mr Device memory resource
+ * @return A table containing all entries in the remapping hash map
+ */
+std::unique_ptr<cudf::table> dump_remap_table(
+  cudf::table_view const& build_keys,
+  key_remap_build_result const& remap_result,
+  rmm::cuda_stream_view stream              = cudf::get_default_stream(),
+  rmm::device_async_resource_ref mr         = cudf::get_current_device_resource_ref());
 
 }  // namespace spark_rapids_jni
 

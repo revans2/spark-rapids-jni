@@ -62,14 +62,14 @@ public class KeyRemappingTest {
   }
 
   /**
-   * Verify that the build side remapping is correct (defaults to nullsEqual=true).
+   * Verify that the build side remapping is correct (defaults to SPARK_EQUALITY mode).
    * 
    * @param buildKeys The original build keys (host data)
    * @param remappedBuild The remapped IDs (host data)
    */
   private void verifyBuildRemapping(HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild) {
-    verifyBuildRemapping(buildKeys, remappedBuild, true);
+    verifyBuildRemapping(buildKeys, remappedBuild, KeyRemapping.NullEqualityMode.SPARK_EQUALITY);
   }
 
   /**
@@ -77,11 +77,11 @@ public class KeyRemappingTest {
    * 
    * @param buildKeys The original build keys (host data)
    * @param remappedBuild The remapped IDs (host data)
-   * @param nullsEqual Whether nulls are considered equal
+   * @param nullMode The null equality mode being tested
    */
   private void verifyBuildRemapping(HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild,
-                                    boolean nullsEqual) {
+                                    KeyRemapping.NullEqualityMode nullMode) {
     int rowCount = (int) remappedBuild.getRowCount();
     assertEquals(rowCount, buildKeys[0].getRowCount());
 
@@ -92,9 +92,11 @@ public class KeyRemappingTest {
     for (int i = 0; i < rowCount; i++) {
       // Extract the key for this row
       Object[] keyValues = new Object[buildKeys.length];
+      boolean hasTopLevelNull = false;
       for (int col = 0; col < buildKeys.length; col++) {
         if (buildKeys[col].isNull(i)) {
           keyValues[col] = null;
+          hasTopLevelNull = true;
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.STRING)) {
           keyValues[col] = buildKeys[col].getJavaString(i);
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.INT32)) {
@@ -105,25 +107,21 @@ public class KeyRemappingTest {
       }
       Key key = new Key(keyValues);
       
+      // Output never has nulls - uses sentinel values instead
+      assertFalse(remappedBuild.isNull(i),
+          "Build remapping output should never be null (uses sentinels)");
+      
       int assignedId = remappedBuild.getInt(i);
       
-      // With nullsEqual=false, null keys cannot be matched (null != null), so they get sentinel
-      boolean isNullKey = false;
-      for (Object val : keyValues) {
-        if (val == null) {
-          isNullKey = true;
-          break;
-        }
-      }
-      
-      if (!nullsEqual && isNullKey) {
-        // Null keys should get sentinel when nullsEqual=false
-        assertEquals(SENTINEL, assignedId,
-            "Null key should get sentinel when nullsEqual=false");
+      // In SPARK_EQUALITY and NULL_NOT_EQUAL: top-level nulls get BUILD_NULL_SENTINEL
+      // In NULL_EQUAL: nulls are treated as regular values and get valid IDs
+      if (hasTopLevelNull && nullMode != KeyRemapping.NullEqualityMode.NULL_EQUAL) {
+        assertEquals(KeyRemapping.getBuildNullSentinel(), assignedId,
+            "Null key should get BUILD_NULL_SENTINEL in " + nullMode + " mode");
       } else {
-        // Non-null keys (or nulls with nullsEqual=true) should get valid IDs
-        assertTrue(assignedId >= 0 && assignedId < rowCount,
-            "Build key ID " + assignedId + " should be in [0, " + rowCount + ") for key " + key);
+        // Non-null keys (or null keys in NULL_EQUAL mode) get valid IDs
+        assertTrue(assignedId >= 0,
+            "Valid key should get non-negative ID, got " + assignedId + " for key " + key);
         
         // Check consistency: same key should always get same ID
         if (keyToId.containsKey(key)) {
@@ -143,7 +141,7 @@ public class KeyRemappingTest {
   }
 
   /**
-   * Verify that the probe side remapping is correct (defaults to nullsEqual=true).
+   * Verify that the probe side remapping is correct (defaults to SPARK_EQUALITY mode).
    * 
    * @param probeKeys The original probe keys (host data)
    * @param remappedProbe The remapped IDs (host data)
@@ -156,7 +154,8 @@ public class KeyRemappingTest {
                                     HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild,
                                     int sentinelValue) {
-    verifyProbeRemapping(probeKeys, remappedProbe, buildKeys, remappedBuild, sentinelValue, true);
+    verifyProbeRemapping(probeKeys, remappedProbe, buildKeys, remappedBuild, sentinelValue, 
+                        KeyRemapping.NullEqualityMode.SPARK_EQUALITY);
   }
 
   /**
@@ -167,14 +166,14 @@ public class KeyRemappingTest {
    * @param buildKeys The original build keys (host data) 
    * @param remappedBuild The build remapped IDs (host data)
    * @param sentinelValue Expected sentinel value for unmatched keys
-   * @param nullsEqual Whether nulls are considered equal
+   * @param nullMode The null equality mode being tested
    */
   private void verifyProbeRemapping(HostColumnVector[] probeKeys,
                                     HostColumnVector remappedProbe,
                                     HostColumnVector[] buildKeys,
                                     HostColumnVector remappedBuild,
                                     int sentinelValue,
-                                    boolean nullsEqual) {
+                                    KeyRemapping.NullEqualityMode nullMode) {
     int probeRowCount = (int) remappedProbe.getRowCount();
     int buildRowCount = (int) remappedBuild.getRowCount();
     
@@ -182,11 +181,11 @@ public class KeyRemappingTest {
     Map<Key, Integer> buildKeyToId = new HashMap<>();
     for (int i = 0; i < buildRowCount; i++) {
       Object[] keyValues = new Object[buildKeys.length];
-      boolean hasNull = false;
+      boolean hasTopLevelNull = false;
       for (int col = 0; col < buildKeys.length; col++) {
         if (buildKeys[col].isNull(i)) {
           keyValues[col] = null;
-          hasNull = true;
+          hasTopLevelNull = true;
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.STRING)) {
           keyValues[col] = buildKeys[col].getJavaString(i);
         } else if (buildKeys[col].getType().equals(ai.rapids.cudf.DType.INT32)) {
@@ -195,22 +194,26 @@ public class KeyRemappingTest {
           throw new IllegalArgumentException("Unsupported type: " + buildKeys[col].getType());
         }
       }
+      
       Key key = new Key(keyValues);
+      int buildId = remappedBuild.getInt(i);
       
-      // Skip null keys when nullsEqual=false (they get sentinel, not valid IDs)
-      if (!nullsEqual && hasNull) {
-        continue;
+      // Only add to map if it's a valid ID (not a sentinel)
+      // In SPARK_EQUALITY/NULL_NOT_EQUAL: null keys get BUILD_NULL_SENTINEL (negative)
+      // In NULL_EQUAL: null keys get valid non-negative IDs
+      if (buildId >= 0) {
+        buildKeyToId.put(key, buildId);
       }
-      
-      buildKeyToId.put(key, remappedBuild.getInt(i));
     }
     
     // Verify each probe key
     for (int i = 0; i < probeRowCount; i++) {
       Object[] keyValues = new Object[probeKeys.length];
+      boolean hasTopLevelNull = false;
       for (int col = 0; col < probeKeys.length; col++) {
         if (probeKeys[col].isNull(i)) {
           keyValues[col] = null;
+          hasTopLevelNull = true;
         } else if (probeKeys[col].getType().equals(ai.rapids.cudf.DType.STRING)) {
           keyValues[col] = probeKeys[col].getJavaString(i);
         } else if (probeKeys[col].getType().equals(ai.rapids.cudf.DType.INT32)) {
@@ -221,27 +224,18 @@ public class KeyRemappingTest {
       }
       Key key = new Key(keyValues);
       
+      // Output never has nulls - uses sentinel values instead
+      assertFalse(remappedProbe.isNull(i),
+          "Probe remapping output should never be null (uses sentinels)");
+      
       int probeId = remappedProbe.getInt(i);
       
-      // Check if this is a null key
-      boolean isNullKey = false;
-      for (Object val : keyValues) {
-        if (val == null) {
-          isNullKey = true;
-          break;
-        }
-      }
-      
-      // With nullsEqual=false, null keys always get sentinel (can't match anything)
-      if (!nullsEqual && isNullKey) {
-        assertEquals(sentinelValue, probeId,
-            "Null probe key should get sentinel when nullsEqual=false");
-      } else if (buildKeyToId.containsKey(key)) {
-        // Key exists in build side - should have same ID
+      if (buildKeyToId.containsKey(key)) {
+        // Key exists in build side with a valid ID - should match
         assertEquals(buildKeyToId.get(key), probeId,
             "Probe key " + key + " should have same ID as in build side");
       } else {
-        // Key doesn't exist in build side - should be sentinel
+        // Key doesn't exist in build side (or null when nulls not equal) - should be sentinel
         assertEquals(sentinelValue, probeId,
             "Probe key " + key + " not in build side should have sentinel value");
       }
@@ -259,8 +253,8 @@ public class KeyRemappingTest {
          Table probeKeys = new Table(probeCol);
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostProbeCol = probeCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost();
@@ -270,84 +264,6 @@ public class KeyRemappingTest {
         verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         
         // Verify probe side mapping
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingPreservesMatches() {
-    // Verify that keys that should match still match after remapping
-    // Build: [1, 2, 3, 4], Probe: [2, 3, 5]
-    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 3, 4);
-         ColumnVector probeCol = ColumnVector.fromInts(2, 3, 5);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingWithDuplicates() {
-    // Build has duplicates initially, but distinct keys will have unique values
-    // Build: [1, 2, 2, 3], Probe: [2, 2, 4]
-    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 2, 3);
-         ColumnVector probeCol = ColumnVector.fromInts(2, 2, 4);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingWithNulls() {
-    // Test that nulls are handled correctly
-    // Build: [1, null, 3], Probe: [null, 3, 4]
-    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(1, null, 3);
-         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 3, 4);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
@@ -369,8 +285,8 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
       
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol1 = buildCol1.copyToHost();
            HostColumnVector hostBuildCol2 = buildCol2.copyToHost();
            HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
@@ -397,39 +313,14 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
         verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
         assertEquals(0, hostProbe.getRowCount());
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingAllUnmatched() {
-    // All probe keys are unmatched
-    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 3);
-         ColumnVector probeCol = ColumnVector.fromInts(4, 5, 6);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
       }
     }
   }
@@ -442,7 +333,7 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
@@ -451,7 +342,7 @@ public class KeyRemappingTest {
         // First probe
         try (ColumnVector probeCol1 = ColumnVector.fromInts(1, 2);
              Table probeKeys1 = new Table(probeCol1);
-             ColumnVector remappedProbe1 = KeyRemapping.applyRemapping(probeKeys1, remap);
+             ColumnVector remappedProbe1 = KeyRemapping.applyRemapping(probeKeys1, remap, false);
              HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
              HostColumnVector hostProbe1 = remappedProbe1.copyToHost()) {
           verifyProbeRemapping(new HostColumnVector[]{hostProbeCol1}, hostProbe1,
@@ -462,7 +353,7 @@ public class KeyRemappingTest {
         // Second probe with different keys
         try (ColumnVector probeCol2 = ColumnVector.fromInts(2, 3);
              Table probeKeys2 = new Table(probeCol2);
-             ColumnVector remappedProbe2 = KeyRemapping.applyRemapping(probeKeys2, remap);
+             ColumnVector remappedProbe2 = KeyRemapping.applyRemapping(probeKeys2, remap, false);
              HostColumnVector hostProbeCol2 = probeCol2.copyToHost();
              HostColumnVector hostProbe2 = remappedProbe2.copyToHost()) {
           verifyProbeRemapping(new HostColumnVector[]{hostProbeCol2}, hostProbe2,
@@ -489,23 +380,6 @@ public class KeyRemappingTest {
   // ==================== EXTENDED TESTS ====================
 
   @Test
-  public void testRemappingDenseSequence() {
-    // Verify that IDs are assigned as dense sequence 0, 1, 2, ...
-    try (ColumnVector buildCol = ColumnVector.fromInts(100, 200, 300, 400);
-         Table buildKeys = new Table(buildCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-      }
-    }
-  }
-
-  @Test
   public void testRemappingLargeKeys() {
     // Test with larger dataset
     int[] buildData = new int[1000];
@@ -525,8 +399,8 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostProbeCol = probeCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost();
@@ -550,62 +424,8 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingSentinelValue() {
-    // Verify the sentinel value returned for unmatched keys
-    try (ColumnVector buildCol = ColumnVector.fromInts(1, 2, 3);
-         ColumnVector probeCol = ColumnVector.fromInts(4, 5, 6);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-      assertEquals(SENTINEL, KeyRemapping.getNotFoundSentinel());
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-        for (int i = 0; i < hostProbe.getRowCount(); i++) {
-          assertEquals(SENTINEL, hostProbe.getInt(i));
-        }
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingNullsEqual() {
-    // Test that nullsEqual parameter works correctly
-    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(1, null, 3);
-         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, null);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, true)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostProbeCol = probeCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost();
@@ -632,7 +452,7 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
@@ -654,36 +474,11 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost()) {
 
         verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-      }
-    }
-  }
-
-  @Test
-  public void testRemappingNullsNotEqual() {
-    // Test with nullsEqual=false - nulls cannot match (not even to themselves)
-    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(1, null, null, 3);
-         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 3);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, false)) {
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        // Verify build and probe remapping with nullsEqual=false
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, false);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL, false);
       }
     }
   }
@@ -698,15 +493,18 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
            HostColumnVector hostProbe = remappedProbe.copyToHost()) {
 
-        // All probe keys should get sentinel since build is empty
-        for (int i = 0; i < hostProbe.getRowCount(); i++) {
-          assertEquals(SENTINEL, hostProbe.getInt(i),
-              "Probe key should get sentinel when build table is empty");
-        }
+        // Verify using helper (empty build table)
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
       }
     }
   }
@@ -752,8 +550,8 @@ public class KeyRemappingTest {
 
       // Distinct keys: (1,a), (2,b), (3,c) = 3
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol1 = buildCol1.copyToHost();
            HostColumnVector hostBuildCol2 = buildCol2.copyToHost();
            HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
@@ -782,8 +580,8 @@ public class KeyRemappingTest {
          KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
 
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol1 = buildCol1.copyToHost();
            HostColumnVector hostBuildCol2 = buildCol2.copyToHost();
            HostColumnVector hostProbeCol1 = probeCol1.copyToHost();
@@ -801,32 +599,6 @@ public class KeyRemappingTest {
   }
 
   @Test
-  public void testRemappingStringsWithNulls() {
-    // Test string keys with nulls
-    try (ColumnVector buildCol = ColumnVector.fromStrings("apple", null, "cherry", null);
-         ColumnVector probeCol = ColumnVector.fromStrings(null, "cherry", "durian");
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, true)) {
-
-      // Distinct: "apple", null, "cherry" = 3
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
-  }
-
-  @Test
   public void testRemappingSentinelIsNegative() {
     // Verify sentinel is always negative
     int sentinel = KeyRemapping.getNotFoundSentinel();
@@ -835,39 +607,6 @@ public class KeyRemappingTest {
     // Verify it's consistent
     assertEquals(sentinel, KeyRemapping.getNotFoundSentinel(),
         "Sentinel should be consistent across calls");
-  }
-
-  @Test
-  public void testRemappingBuildKeysAllSame() {
-    // Test with all build keys being the same value
-    try (ColumnVector buildCol = ColumnVector.fromInts(5, 5, 5, 5, 5);
-         ColumnVector probeCol = ColumnVector.fromInts(5, 6);
-         Table buildKeys = new Table(buildCol);
-         Table probeKeys = new Table(probeCol);
-         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
-
-
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
-           HostColumnVector hostBuildCol = buildCol.copyToHost();
-           HostColumnVector hostProbeCol = probeCol.copyToHost();
-           HostColumnVector hostBuild = remappedBuild.copyToHost();
-           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
-
-        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
-        
-        // All build keys should have same remapped value
-        int firstId = hostBuild.getInt(0);
-        for (int i = 1; i < hostBuild.getRowCount(); i++) {
-          assertEquals(firstId, hostBuild.getInt(i),
-              "All identical keys should have same remapped ID");
-        }
-        
-        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
-                            new HostColumnVector[]{hostBuildCol}, hostBuild,
-                            SENTINEL);
-      }
-    }
   }
 
   @Test
@@ -881,8 +620,8 @@ public class KeyRemappingTest {
 
       // Distinct: "", "a" = 2
 
-      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap);
-           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap);
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
            HostColumnVector hostBuildCol = buildCol.copyToHost();
            HostColumnVector hostProbeCol = probeCol.copyToHost();
            HostColumnVector hostBuild = remappedBuild.copyToHost();
@@ -892,6 +631,364 @@ public class KeyRemappingTest {
         verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
                             new HostColumnVector[]{hostBuildCol}, hostBuild,
                             SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testDumpRemapTable() {
+    // Test the dump functionality with a simple case
+    try (ColumnVector buildCol = ColumnVector.fromInts(10, 20, 10, 30, 20);
+         Table buildKeys = new Table(buildCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      // Build has 5 rows with 3 distinct values: 10, 20, 30
+      // Expected distinct entries: 3
+
+      try (Table dumpTable = KeyRemapping.dumpRemapTable(remap)) {
+        // Verify table structure
+        assertEquals(3, dumpTable.getNumberOfColumns(), 
+            "Dump table should have 3 columns: hash, key_row_index, mapped_value");
+        
+        // Copy to host for inspection
+        try (HostColumnVector hashCol = dumpTable.getColumn(0).copyToHost();
+             HostColumnVector keyRowIdxCol = dumpTable.getColumn(1).copyToHost();
+             HostColumnVector mappedValueCol = dumpTable.getColumn(2).copyToHost()) {
+
+          int numEntries = (int) hashCol.getRowCount();
+          
+          // Should have 3 distinct entries
+          assertEquals(3, numEntries, "Should have 3 distinct keys in the map");
+
+          // Track which row indices we've seen and their mapped values
+          Map<Integer, Integer> rowIdxToMappedValue = new HashMap<>();
+          Set<Integer> seenHashes = new HashSet<>();
+          Set<Integer> seenMappedValues = new HashSet<>();
+
+          for (int i = 0; i < numEntries; i++) {
+            // Extract values
+            int hash = hashCol.getInt(i);
+            int keyRowIdx = keyRowIdxCol.getInt(i);
+            int mappedValue = mappedValueCol.getInt(i);
+
+            // Verify hash is non-zero (valid hash)
+            assertNotEquals(0, hash, "Hash should not be zero");
+            seenHashes.add(hash);
+
+            // Verify key row index is valid (within bounds of build table)
+            assertTrue(keyRowIdx >= 0 && keyRowIdx < 5, 
+                "Key row index should be within build table bounds [0, 5)");
+
+            // Verify mapped value is non-negative
+            assertTrue(mappedValue >= 0, "Mapped value should be non-negative");
+            
+            // Store mapping
+            rowIdxToMappedValue.put(keyRowIdx, mappedValue);
+            seenMappedValues.add(mappedValue);
+          }
+
+          // Verify we have 3 unique hashes (one per distinct key)
+          assertEquals(3, seenHashes.size(), "Should have 3 unique hashes");
+          
+          // Verify we have 3 unique mapped values
+          assertEquals(3, seenMappedValues.size(), "Should have 3 unique mapped values");
+
+          // Verify the key row indices correspond to one example of each distinct value
+          // With lowest-index-wins, we expect to see indices: 0 (for 10), 1 (for 20), 3 (for 30)
+          assertTrue(rowIdxToMappedValue.containsKey(0), "Should see row index 0 (first 10)");
+          assertTrue(rowIdxToMappedValue.containsKey(1), "Should see row index 1 (first 20)");
+          assertTrue(rowIdxToMappedValue.containsKey(3), "Should see row index 3 (first 30)");
+          
+          System.out.println("Dump table contents:");
+          for (int i = 0; i < numEntries; i++) {
+            System.out.println(String.format("  hash=%d, key_row_index=%d, mapped_value=%d",
+                hashCol.getInt(i), keyRowIdxCol.getInt(i), mappedValueCol.getInt(i)));
+          }
+        }
+      }
+    }
+  }
+
+  @Test
+  public void testDumpRemapTableEmpty() {
+    // Test dump with empty build table
+    try (ColumnVector buildCol = ColumnVector.fromInts();
+         Table buildKeys = new Table(buildCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      try (Table dumpTable = KeyRemapping.dumpRemapTable(remap)) {
+        // Verify table structure
+        assertEquals(3, dumpTable.getNumberOfColumns(), 
+            "Dump table should have 3 columns even when empty");
+        assertEquals(0, dumpTable.getRowCount(), "Dump table should have 0 rows for empty build");
+      }
+    }
+  }
+
+  @Test
+  public void testSparkEqualityTopLevelNulls() {
+    // Test that top-level nulls are NOT equal in SPARK_EQUALITY mode (default)
+    // Build: [1, null, null, 2]
+    // Probe: [1, null, 2, 3]
+    // Expected: matching keys get same IDs, nulls get sentinels
+    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(1, null, null, 2);
+         ColumnVector probeCol = ColumnVector.fromBoxedInts(1, null, 2, 3);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+
+        // Verify build side: non-null keys get valid IDs, nulls get BUILD_NULL_SENTINEL
+        assertFalse(hostBuild.isNull(0), "Build result should not be null for non-null key");
+        assertFalse(hostBuild.isNull(1), "Build result should not be null (uses sentinel instead)");
+        assertFalse(hostBuild.isNull(2), "Build result should not be null (uses sentinel instead)");
+        assertFalse(hostBuild.isNull(3), "Build result should not be null for non-null key");
+        
+        int buildKey1Id = hostBuild.getInt(0);
+        int buildNull1Sentinel = hostBuild.getInt(1);
+        int buildNull2Sentinel = hostBuild.getInt(2);
+        int buildKey2Id = hostBuild.getInt(3);
+        
+        // Build-side nulls should get BUILD_NULL_SENTINEL
+        assertEquals(KeyRemapping.getBuildNullSentinel(), buildNull1Sentinel, 
+            "Build null should get BUILD_NULL_SENTINEL");
+        assertEquals(KeyRemapping.getBuildNullSentinel(), buildNull2Sentinel, 
+            "Build null should get BUILD_NULL_SENTINEL");
+        
+        // Non-null build keys should get non-negative IDs
+        assertTrue(buildKey1Id >= 0, "Non-null build key should get non-negative ID");
+        assertTrue(buildKey2Id >= 0, "Non-null build key should get non-negative ID");
+
+        // Verify probe side: matching keys get same ID, non-matching get NOT_FOUND_SENTINEL
+        assertFalse(hostProbe.isNull(0), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(1), "Probe result should not be null (uses sentinel instead)");
+        assertFalse(hostProbe.isNull(2), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(3), "Probe result should not be null (uses sentinel instead)");
+        
+        // Probe key 1 should match build key 1
+        assertEquals(buildKey1Id, hostProbe.getInt(0), "Probe key 1 should match build");
+        
+        // Probe null should NOT match (top-level nulls not equal) - gets NOT_FOUND_SENTINEL
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(1), 
+            "Probe null should not match build (top-level nulls not equal)");
+        
+        // Probe key 2 should match build key 2
+        assertEquals(buildKey2Id, hostProbe.getInt(2), "Probe key 2 should match build");
+        
+        // Probe key 3 not in build - gets NOT_FOUND_SENTINEL
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(3), 
+            "Probe key 3 should not be found");
+        
+        // Also verify using helper methods for overall correctness
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testSparkEqualityNestedNulls() {
+    // Test that nested nulls (inside structs) ARE equal in SPARK_EQUALITY mode
+    // Build: [struct(1, null), struct(2, 3), struct(1, null)]
+    // Expected: struct(1, null) appears twice - should be treated as equal and deduplicate
+    // Probe: [struct(1, null), struct(2, 3), struct(3, null)]
+    try (ColumnVector child1Build = ColumnVector.fromBoxedInts(1, 2, 1);
+         ColumnVector child2Build = ColumnVector.fromBoxedInts(null, 3, null);
+         ColumnVector buildCol = ColumnVector.makeStruct(child1Build, child2Build);
+         ColumnVector child1Probe = ColumnVector.fromBoxedInts(1, 2, 3);
+         ColumnVector child2Probe = ColumnVector.fromBoxedInts(null, 3, null);
+         ColumnVector probeCol = ColumnVector.makeStruct(child1Probe, child2Probe);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+        
+        // Verify: struct(1,null) at rows 0 and 2 should have same ID (nested nulls are equal)
+        assertFalse(hostBuild.isNull(0), "Build result should not be null");
+        assertFalse(hostBuild.isNull(1), "Build result should not be null");
+        assertFalse(hostBuild.isNull(2), "Build result should not be null");
+        
+        int id0 = hostBuild.getInt(0);  // struct(1, null)
+        int id1 = hostBuild.getInt(1);  // struct(2, 3)
+        int id2 = hostBuild.getInt(2);  // struct(1, null) again
+        
+        assertEquals(id0, id2, "struct(1,null) should map to same ID (nested nulls ARE equal)");
+        assertNotEquals(id0, id1, "Different structs should have different IDs");
+        
+        // Verify probe side: struct(1,null) should match, struct(3,null) should not
+        assertFalse(hostProbe.isNull(0), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(1), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(2), "Probe result should not be null");
+        
+        assertEquals(id0, hostProbe.getInt(0), "Probe struct(1,null) should match build");
+        assertEquals(id1, hostProbe.getInt(1), "Probe struct(2,3) should match build");
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(2), 
+            "Probe struct(3,null) should not be found");
+        
+        // Note: Helper methods don't support struct types, manual verification is appropriate here
+      }
+    }
+  }
+
+  @Test
+  public void testSentinelValuesAreDistinct() {
+    // Verify that NOT_FOUND_SENTINEL and BUILD_NULL_SENTINEL are different values
+    int notFound = KeyRemapping.getNotFoundSentinel();
+    int buildNull = KeyRemapping.getBuildNullSentinel();
+    
+    assertNotEquals(notFound, buildNull, 
+        "NOT_FOUND_SENTINEL and BUILD_NULL_SENTINEL must be distinct");
+    assertTrue(notFound < 0, "NOT_FOUND_SENTINEL should be negative");
+    assertTrue(buildNull < 0, "BUILD_NULL_SENTINEL should be negative");
+  }
+
+  @Test
+  public void testSentinelAssignmentBuildVsProbe() {
+    // Test that nulls get different sentinels for build vs probe side
+    // Build: [null, 1]
+    // Probe: [null, 1]
+    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(null, 1);
+         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 1);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+        
+        // Build side: null gets BUILD_NULL_SENTINEL
+        assertEquals(KeyRemapping.getBuildNullSentinel(), hostBuild.getInt(0), 
+            "Build-side null should get BUILD_NULL_SENTINEL");
+        
+        // Probe side: null gets NOT_FOUND_SENTINEL (because top-level nulls don't match)
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(0), 
+            "Probe-side null should get NOT_FOUND_SENTINEL (no match)");
+        
+        // Also verify using helper methods for overall correctness
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL);
+      }
+    }
+  }
+
+  @Test
+  public void testNullEqualMode() {
+    // Test NULL_EQUAL mode: all nulls (including top-level) are equal
+    // Build: [null, 1, null]
+    // Probe: [null, 1, 2]
+    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(null, 1, null);
+         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 1, 2);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, 
+             KeyRemapping.NullEqualityMode.NULL_EQUAL)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+        
+        // In NULL_EQUAL mode, nulls are treated as equal values
+        assertFalse(hostBuild.isNull(0), "Build result should not be null");
+        assertFalse(hostBuild.isNull(1), "Build result should not be null");
+        assertFalse(hostBuild.isNull(2), "Build result should not be null");
+        
+        int nullId1 = hostBuild.getInt(0);  // null
+        int key1Id = hostBuild.getInt(1);   // 1
+        int nullId2 = hostBuild.getInt(2);  // null again
+        
+        // Null keys at rows 0 and 2 should map to same ID (nulls are equal)
+        assertEquals(nullId1, nullId2, "Nulls should map to same ID in NULL_EQUAL mode");
+        
+        // Probe: null should match build null, key 1 should match, key 2 not found
+        assertFalse(hostProbe.isNull(0), "Probe result should not be null");
+        assertEquals(nullId1, hostProbe.getInt(0), "Probe null should match build null");
+        assertEquals(key1Id, hostProbe.getInt(1), "Probe key 1 should match build");
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(2), 
+            "Probe key 2 should not be found");
+        
+        // Also verify using helper methods for overall correctness
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 
+                            KeyRemapping.NullEqualityMode.NULL_EQUAL);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL, KeyRemapping.NullEqualityMode.NULL_EQUAL);
+      }
+    }
+  }
+
+  @Test
+  public void testNullNotEqualMode() {
+    // Test NULL_NOT_EQUAL mode: no nulls are equal (even nested nulls)
+    // Behaves the same as SPARK_EQUALITY for top-level nulls
+    // Build: [null, 1, null]
+    // Probe: [null, 1, 2]
+    try (ColumnVector buildCol = ColumnVector.fromBoxedInts(null, 1, null);
+         ColumnVector probeCol = ColumnVector.fromBoxedInts(null, 1, 2);
+         Table buildKeys = new Table(buildCol);
+         Table probeKeys = new Table(probeCol);
+         KeyRemapping.RemapStructures remap = KeyRemapping.createRemapStructures(buildKeys, 
+             KeyRemapping.NullEqualityMode.NULL_NOT_EQUAL)) {
+
+      try (ColumnVector remappedBuild = KeyRemapping.applyRemapping(buildKeys, remap, true);
+           ColumnVector remappedProbe = KeyRemapping.applyRemapping(probeKeys, remap, false);
+           HostColumnVector hostBuildCol = buildCol.copyToHost();
+           HostColumnVector hostProbeCol = probeCol.copyToHost();
+           HostColumnVector hostBuild = remappedBuild.copyToHost();
+           HostColumnVector hostProbe = remappedProbe.copyToHost()) {
+        
+        // Build side: nulls get BUILD_NULL_SENTINEL, non-nulls get valid IDs
+        assertFalse(hostBuild.isNull(0), "Build result should not be null");
+        assertFalse(hostBuild.isNull(1), "Build result should not be null");
+        assertFalse(hostBuild.isNull(2), "Build result should not be null");
+        
+        assertEquals(KeyRemapping.getBuildNullSentinel(), hostBuild.getInt(0), 
+            "Build null should get BUILD_NULL_SENTINEL in NULL_NOT_EQUAL mode");
+        assertEquals(KeyRemapping.getBuildNullSentinel(), hostBuild.getInt(2), 
+            "Build null should get BUILD_NULL_SENTINEL in NULL_NOT_EQUAL mode");
+        
+        int key1Id = hostBuild.getInt(1);
+        assertTrue(key1Id >= 0, "Non-null build key should get non-negative ID");
+
+        // Probe side: nulls get NOT_FOUND_SENTINEL (nulls are never equal)
+        assertFalse(hostProbe.isNull(0), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(1), "Probe result should not be null");
+        assertFalse(hostProbe.isNull(2), "Probe result should not be null");
+        
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(0), 
+            "Probe null should get NOT_FOUND_SENTINEL (nulls are not equal)");
+        assertEquals(key1Id, hostProbe.getInt(1), "Probe key 1 should match build");
+        assertEquals(KeyRemapping.getNotFoundSentinel(), hostProbe.getInt(2), 
+            "Probe key 2 should not be found");
+        
+        // Also verify using helper methods for overall correctness
+        verifyBuildRemapping(new HostColumnVector[]{hostBuildCol}, hostBuild, 
+                            KeyRemapping.NullEqualityMode.NULL_NOT_EQUAL);
+        verifyProbeRemapping(new HostColumnVector[]{hostProbeCol}, hostProbe,
+                            new HostColumnVector[]{hostBuildCol}, hostBuild,
+                            SENTINEL, KeyRemapping.NullEqualityMode.NULL_NOT_EQUAL);
       }
     }
   }

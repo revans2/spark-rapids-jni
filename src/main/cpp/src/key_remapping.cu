@@ -21,6 +21,7 @@
 #include <cudf/detail/cuco_helpers.hpp>
 #include <cudf/detail/gather.hpp>
 #include <cudf/detail/iterator.cuh>
+#include <cudf/detail/null_mask.hpp>
 #include <cudf/detail/row_operator/equality.cuh>
 #include <cudf/detail/row_operator/hashing.cuh>
 #include <cudf/detail/utilities/vector_factories.hpp>
@@ -143,6 +144,7 @@ std::unique_ptr<hash_map_holder> build_map_impl(
   cudf::detail::row::equality::self_comparator const& row_equal,
   bool has_nulls,
   cudf::null_equality nulls_equal,
+  null_equality_mode null_mode,
   rmm::cuda_stream_view stream,
   rmm::device_async_resource_ref mr)
 {
@@ -168,21 +170,76 @@ std::unique_ptr<hash_map_holder> build_map_impl(
     rmm::mr::polymorphic_allocator<char>{},
     stream.value()};
 
+  // Create device table view for top-level null checking
+  auto const d_input = cudf::table_device_view::create(input, stream);
+  
   auto map_ref = map.ref(cuco::op::insert_and_find);
-  thrust::for_each(
-    rmm::exec_policy_nosync(stream),
-    thrust::make_counting_iterator(0),
-    thrust::make_counting_iterator(num_rows),
-    [map_ref, d_hasher] __device__(cudf::size_type idx) mutable {
-      auto const row_hash = d_hasher(idx);
-      using rhs_type      = cudf::detail::row::rhs_index_type;
-      auto [iter, inserted] =
-        map_ref.insert_and_find(cuco::pair{key_type{row_hash, rhs_type{idx}}, idx});
+  
+  // For SPARK_EQUALITY and NULL_NOT_EQUAL, skip rows with top-level nulls during insertion
+  bool const skip_top_level_nulls = 
+    (null_mode == null_equality_mode::SPARK_EQUALITY) || 
+    (null_mode == null_equality_mode::NULL_NOT_EQUAL);
+  
+  // For SPARK_EQUALITY and NULL_NOT_EQUAL modes, we need to check for top-level nulls.
+  // Optimization: if there are no nulls at all, skip to the fast path without null checking.
+  // This is a common case in many workloads and avoids device-side null checking overhead.
+  if (skip_top_level_nulls && has_nulls) {
+    // Need to check for top-level nulls on each row and skip inserting those rows
+    auto const d_input_view = *d_input;  // Copy the device view by value
+    
+    thrust::for_each(
+      rmm::exec_policy(stream),
+      thrust::make_counting_iterator(0),
+      thrust::make_counting_iterator(num_rows),
+      [map_ref, d_hasher, d_input_view] __device__(cudf::size_type idx) mutable {
+        // Check if this row has any top-level nulls
+        bool has_null = false;
+        for (cudf::size_type col_idx = 0; col_idx < d_input_view.num_columns(); ++col_idx) {
+          if (d_input_view.column(col_idx).is_null(idx)) {
+            has_null = true;
+            break;
+          }
+        }
+        
+        // Skip rows with top-level nulls
+        if (has_null) {
+          return;
+        }
+        
+        auto const row_hash = d_hasher(idx);
+        using rhs_type      = cudf::detail::row::rhs_index_type;
+        auto [iter, inserted] =
+          map_ref.insert_and_find(cuco::pair{key_type{row_hash, rhs_type{idx}}, idx});
 
-      if (inserted) {
-        iter->second = idx;
-      }
-    });
+        if (inserted) {
+          iter->second = idx;
+        } else {
+          // If the key already exists, atomically update to the minimum row index
+          cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device> ref{iter->second};
+          ref.fetch_min(idx, cuda::memory_order_relaxed);
+        }
+      });
+  } else {
+    // When not skipping nulls, use the simpler version without null checks
+    thrust::for_each(
+      rmm::exec_policy(stream),
+      thrust::make_counting_iterator(0),
+      thrust::make_counting_iterator(num_rows),
+      [map_ref, d_hasher] __device__(cudf::size_type idx) mutable {
+        auto const row_hash = d_hasher(idx);
+        using rhs_type      = cudf::detail::row::rhs_index_type;
+        auto [iter, inserted] =
+          map_ref.insert_and_find(cuco::pair{key_type{row_hash, rhs_type{idx}}, idx});
+
+        if (inserted) {
+          iter->second = idx;
+        } else {
+          // If the key already exists, atomically update to the minimum row index
+          cuda::atomic_ref<cudf::size_type, cuda::thread_scope_device> ref{iter->second};
+          ref.fetch_min(idx, cuda::memory_order_relaxed);
+        }
+      });
+  }
 
   auto holder =
     std::make_unique<typed_hash_map_holder<has_nested>>(std::move(map));
@@ -229,9 +286,13 @@ std::unique_ptr<cudf::column> lookup_keys_two_table(
       cudf::data_type{cudf::type_id::INT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr);
   }
 
-  // Create output column
+  // Output column never has nulls - we use sentinel values instead
   auto output = cudf::make_numeric_column(
-    cudf::data_type{cudf::type_id::INT32}, num_probe_rows, cudf::mask_state::UNALLOCATED, stream, mr);
+    cudf::data_type{cudf::type_id::INT32}, 
+    num_probe_rows, 
+    cudf::mask_state::UNALLOCATED, 
+    stream, 
+    mr);
 
   // Get device hasher for probe table
   auto const d_hasher = probe_hasher.device_hasher(cudf::nullate::DYNAMIC{has_nulls});
@@ -260,7 +321,7 @@ key_remap_build_result::~key_remap_build_result()
 }
 
 std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view const& input_keys,
-                                                             cudf::null_equality nulls_equal,
+                                                             null_equality_mode null_mode,
                                                              rmm::cuda_stream_view stream,
                                                              rmm::device_async_resource_ref mr)
 {
@@ -269,10 +330,28 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
   if (input_keys.num_rows() == 0 || input_keys.num_columns() == 0) {
     auto result            = std::make_unique<key_remap_build_result>();
     result->hash_map_ptr   = nullptr;
-    result->nulls_equal    = nulls_equal;
+    result->null_mode      = null_mode;
     result->has_nested_columns = has_nested_columns;
     result->preprocessed_build = nullptr;
     return result;
+  }
+
+  // Convert null_equality_mode to CUDF's null_equality
+  // For SPARK_EQUALITY, we use EQUAL for nested nulls (CUDF will handle this correctly)
+  // and we'll filter out top-level nulls during insertion
+  cudf::null_equality cudf_nulls_equal = cudf::null_equality::EQUAL;  // Default initialization
+  switch (null_mode) {
+    case null_equality_mode::NULL_EQUAL:
+      cudf_nulls_equal = cudf::null_equality::EQUAL;
+      break;
+    case null_equality_mode::NULL_NOT_EQUAL:
+      cudf_nulls_equal = cudf::null_equality::UNEQUAL;
+      break;
+    case null_equality_mode::SPARK_EQUALITY:
+      // Use EQUAL for CUDF - this handles nested nulls correctly
+      // We'll skip top-level nulls during insertion
+      cudf_nulls_equal = cudf::null_equality::EQUAL;
+      break;
   }
 
   // Preprocess the input for hashing
@@ -293,16 +372,16 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
 
   if (has_nested_columns) {
     map_holder = build_map_impl<true>(
-      input_keys, row_hash, self_equal, has_nulls, nulls_equal, stream, mr);
+      input_keys, row_hash, self_equal, has_nulls, cudf_nulls_equal, null_mode, stream, mr);
   } else {
     map_holder = build_map_impl<false>(
-      input_keys, row_hash, self_equal, has_nulls, nulls_equal, stream, mr);
+      input_keys, row_hash, self_equal, has_nulls, cudf_nulls_equal, null_mode, stream, mr);
   }
 
   // Create the result
   auto result            = std::make_unique<key_remap_build_result>();
   result->hash_map_ptr   = map_holder.release();
-  result->nulls_equal    = nulls_equal;
+  result->null_mode      = null_mode;
   result->has_nested_columns = has_nested_columns;
   
   // Cache the preprocessed build table for reuse across multiple probe operations
@@ -314,6 +393,8 @@ std::unique_ptr<key_remap_build_result> build_key_remap_map(cudf::table_view con
 std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys,
                                                cudf::table_view const& input_keys,
                                                key_remap_build_result const& remap_result,
+                                               null_equality_mode null_mode,
+                                               bool is_build_side,
                                                rmm::cuda_stream_view stream,
                                                rmm::device_async_resource_ref mr)
 {
@@ -322,22 +403,36 @@ std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys
       cudf::data_type{cudf::type_id::INT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr);
   }
 
-  // If build table was empty (hash_map_ptr is nullptr), all probe keys map to sentinel
+  // If build table was empty (hash_map_ptr is nullptr), all keys map to NOT_FOUND_SENTINEL
   if (remap_result.hash_map_ptr == nullptr) {
     auto output = cudf::make_numeric_column(
       cudf::data_type{cudf::type_id::INT32}, input_keys.num_rows(), cudf::mask_state::UNALLOCATED, stream, mr);
     thrust::fill(rmm::exec_policy(stream),
                  output->mutable_view().begin<cudf::size_type>(),
                  output->mutable_view().end<cudf::size_type>(),
-                 cudf::detail::CUDF_SIZE_TYPE_SENTINEL);
+                 NOT_FOUND_SENTINEL);
     return output;
+  }
+
+  // Convert null_equality_mode to CUDF's null_equality
+  cudf::null_equality cudf_nulls_equal = cudf::null_equality::EQUAL;  // Default initialization
+  switch (null_mode) {
+    case null_equality_mode::NULL_EQUAL:
+      cudf_nulls_equal = cudf::null_equality::EQUAL;
+      break;
+    case null_equality_mode::NULL_NOT_EQUAL:
+      cudf_nulls_equal = cudf::null_equality::UNEQUAL;
+      break;
+    case null_equality_mode::SPARK_EQUALITY:
+      cudf_nulls_equal = cudf::null_equality::EQUAL;
+      break;
   }
 
   // Only preprocess the probe table (changes with each call)
   // Use cached preprocessed build table (created once during build phase)
   auto preprocessed_probe =
     cudf::detail::row::equality::preprocessed_table::create(input_keys, stream);
-    
+  
   auto const has_nulls =
     cudf::has_nulls(build_keys) || cudf::has_nested_nulls(build_keys) || cudf::has_nulls(input_keys) ||
     cudf::has_nested_nulls(input_keys);
@@ -349,21 +444,56 @@ std::unique_ptr<cudf::column> apply_key_remap(cudf::table_view const& build_keys
 
   // Create probe hasher
   auto const probe_hasher = cudf::detail::row::hash::row_hasher(preprocessed_probe);
-
   // Call lookup with the appropriate comparator
+  std::unique_ptr<cudf::column> result;
   if (use_nested_comparator) {
     auto const device_comparator =
-      two_table_equal.equal_to<true>(cudf::nullate::DYNAMIC{has_nulls}, remap_result.nulls_equal);
+      two_table_equal.equal_to<true>(cudf::nullate::DYNAMIC{has_nulls}, cudf_nulls_equal);
     auto const* holder = static_cast<typed_hash_map_holder<true>*>(remap_result.hash_map_ptr);
-    return lookup_keys_two_table(
+    result = lookup_keys_two_table(
       input_keys, holder->map, probe_hasher, has_nulls, device_comparator, stream, mr);
   } else {
     auto const device_comparator =
-      two_table_equal.equal_to<false>(cudf::nullate::DYNAMIC{has_nulls}, remap_result.nulls_equal);
+      two_table_equal.equal_to<false>(cudf::nullate::DYNAMIC{has_nulls}, cudf_nulls_equal);
     auto const* holder = static_cast<typed_hash_map_holder<false>*>(remap_result.hash_map_ptr);
-    return lookup_keys_two_table(
+    result = lookup_keys_two_table(
       input_keys, holder->map, probe_hasher, has_nulls, device_comparator, stream, mr);
   }
+  
+  // For build-side remapping with SPARK_EQUALITY or NULL_NOT_EQUAL:
+  // Assign BUILD_NULL_SENTINEL to rows with top-level nulls
+  // Optimization: Only check for nulls if the input actually has nulls
+  bool const needs_null_processing = is_build_side && 
+      (null_mode == null_equality_mode::SPARK_EQUALITY || null_mode == null_equality_mode::NULL_NOT_EQUAL) &&
+      (cudf::has_nulls(input_keys) || cudf::has_nested_nulls(input_keys));
+  
+  if (needs_null_processing) {
+    auto const d_input = cudf::table_device_view::create(input_keys, stream);
+    auto const d_input_view = *d_input;  // Copy device view by value
+    auto result_view = result->mutable_view();
+    auto result_data = result_view.begin<cudf::size_type>();
+    
+    thrust::for_each(
+      rmm::exec_policy(stream),
+      thrust::make_counting_iterator(0),
+      thrust::make_counting_iterator(input_keys.num_rows()),
+      [result_data, d_input_view] __device__(cudf::size_type idx) mutable {
+        // Check if this row has any top-level nulls
+        bool has_null = false;
+        for (cudf::size_type col_idx = 0; col_idx < d_input_view.num_columns(); ++col_idx) {
+          if (d_input_view.column(col_idx).is_null(idx)) {
+            has_null = true;
+            break;
+          }
+        }
+        
+        if (has_null) {
+          result_data[idx] = BUILD_NULL_SENTINEL;
+        }
+      });
+  }
+
+  return result;
 }
 
 void free_key_remap_map(void* hash_map_ptr)
@@ -373,6 +503,119 @@ void free_key_remap_map(void* hash_map_ptr)
     // This is tricky because we've type-erased it
     // The virtual destructor in hash_map_holder should handle this
     delete static_cast<hash_map_holder*>(hash_map_ptr);
+  }
+}
+
+namespace {
+
+/**
+ * @brief Extract all entries from the hash map for debugging
+ * Returns the raw map internals: hash values, key row indices, and mapped values
+ */
+template <typename MapType>
+std::unique_ptr<cudf::table> dump_map_impl(
+  MapType const& build_map,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  // Retrieve all key-value pairs from the map
+  rmm::device_uvector<key_type> retrieved_keys(build_map.capacity(), stream);
+  rmm::device_uvector<cudf::size_type> retrieved_values(build_map.capacity(), stream);
+  
+  auto [keys_end, vals_end] = build_map.retrieve_all(
+    retrieved_keys.begin(), 
+    retrieved_values.begin(), 
+    cuda::stream_ref{stream.value()});
+  
+  auto const num_entries = std::distance(retrieved_keys.begin(), keys_end);
+  
+  // Resize to actual number of entries
+  retrieved_keys.resize(num_entries, stream);
+  retrieved_values.resize(num_entries, stream);
+  
+  // Extract hash values from keys
+  auto hash_col = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::UINT32},
+    num_entries,
+    cudf::mask_state::UNALLOCATED,
+    stream,
+    mr);
+  auto hash_output = hash_col->mutable_view().template begin<cudf::hash_value_type>();
+  thrust::transform(
+    rmm::exec_policy(stream),
+    retrieved_keys.begin(),
+    retrieved_keys.end(),
+    hash_output,
+    [] __device__(key_type const& k) { 
+      return k.first; 
+    });
+  
+  // Extract row indices from keys
+  auto row_idx_col = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::INT32},
+    num_entries,
+    cudf::mask_state::UNALLOCATED,
+    stream,
+    mr);
+  auto row_idx_output = row_idx_col->mutable_view().template begin<cudf::size_type>();
+  thrust::transform(
+    rmm::exec_policy(stream),
+    retrieved_keys.begin(),
+    retrieved_keys.end(),
+    row_idx_output,
+    [] __device__(key_type const& k) { 
+      return static_cast<cudf::size_type>(k.second); 
+    });
+  
+  // Create a column from retrieved values (mapped values)
+  auto values_col = cudf::make_numeric_column(
+    cudf::data_type{cudf::type_id::INT32},
+    num_entries,
+    cudf::mask_state::UNALLOCATED,
+    stream,
+    mr);
+  auto values_output = values_col->mutable_view().template begin<cudf::size_type>();
+  thrust::copy(
+    rmm::exec_policy(stream),
+    retrieved_values.begin(),
+    retrieved_values.end(),
+    values_output);
+  
+  // Build result table with 3 columns: hash, key_row_index, mapped_value
+  std::vector<std::unique_ptr<cudf::column>> result_columns;
+  result_columns.push_back(std::move(hash_col));
+  result_columns.push_back(std::move(row_idx_col));
+  result_columns.push_back(std::move(values_col));
+  
+  return std::make_unique<cudf::table>(std::move(result_columns));
+}
+
+}  // anonymous namespace
+
+std::unique_ptr<cudf::table> dump_remap_table(
+  cudf::table_view const& build_keys,
+  key_remap_build_result const& remap_result,
+  rmm::cuda_stream_view stream,
+  rmm::device_async_resource_ref mr)
+{
+  if (remap_result.hash_map_ptr == nullptr) {
+    // Return empty table with 3 columns: hash, key_row_index, mapped_value
+    std::vector<std::unique_ptr<cudf::column>> columns;
+    columns.push_back(cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::UINT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr));
+    columns.push_back(cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::INT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr));
+    columns.push_back(cudf::make_numeric_column(
+      cudf::data_type{cudf::type_id::INT32}, 0, cudf::mask_state::UNALLOCATED, stream, mr));
+    return std::make_unique<cudf::table>(std::move(columns));
+  }
+
+  if (remap_result.has_nested_columns) {
+    auto const* holder = static_cast<typed_hash_map_holder<true>*>(remap_result.hash_map_ptr);
+    return dump_map_impl(holder->map, stream, mr);
+  } else {
+    auto const* holder = static_cast<typed_hash_map_holder<false>*>(remap_result.hash_map_ptr);
+    return dump_map_impl(holder->map, stream, mr);
   }
 }
 
